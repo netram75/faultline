@@ -11,13 +11,18 @@ from pathlib import Path
 import pytest
 
 from faultline.fs import FileSystem
+from faultline.fs.fake import FakeFileSystem
 from faultline.fs.real import OSFileSystem
 
 
-@pytest.fixture
-def setup(tmp_path: Path) -> tuple[FileSystem, str]:
+@pytest.fixture(params=["real", "fake"])
+def setup(request: pytest.FixtureRequest, tmp_path: Path) -> tuple[FileSystem, str]:
     """A file system and an empty folder to work in."""
-    return OSFileSystem(), str(tmp_path)
+    if request.param == "real":
+        return OSFileSystem(), str(tmp_path)
+    fs = FakeFileSystem()
+    fs.mkdir("/data")
+    return fs, "/data"
 
 
 def test_write_then_read(setup: tuple[FileSystem, str]) -> None:
