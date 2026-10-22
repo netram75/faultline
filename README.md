@@ -11,7 +11,7 @@ writes on purpose, then checks that every answer the database gave was correct.
 
 ## Plan
 
-- [ ] Write-ahead log that survives crashes
+- [x] Write-ahead log that survives crashes ([how it works](docs/wal.md))
 - [ ] Storage engine (LSM tree): memory table, sorted disk files, bloom filters, compaction
 - [ ] Raft: leader election and log replication
 - [ ] Database on top of Raft: sessions, safe reads, snapshots
@@ -19,6 +19,25 @@ writes on purpose, then checks that every answer the database gave was correct.
 - [ ] Correctness checker (linearizability) and a bug hunt
 - [ ] Real cluster: TCP, Redis protocol, Docker, chaos tests, metrics
 - [ ] Docs and release
+
+## Layout
+
+```
+src/faultline/
+  fs/     file access: the real disk, and a fake disk that can crash
+  wal/    write-ahead log: record format, writer, recovery
+tests/    one folder per package, same names
+docs/     how each part works and why
+```
+
+## Running the checks
+
+Needs Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+
+```
+uv sync
+make check     # lint, type check, tests
+```
 
 ## License
 
