@@ -46,9 +46,41 @@ class OSFile:
             self._fd = -1
 
 
+class OSReader:
+    def __init__(self, path: str) -> None:
+        self._fd = os.open(path, os.O_RDONLY)
+        self._size = os.fstat(self._fd).st_size
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+    def read_at(self, offset: int, length: int) -> bytes:
+        # pread reads at an offset without moving a shared file position, so
+        # two readers on the same file can't get in each other's way. Like
+        # write, it can return less than asked for, so loop.
+        chunks = []
+        while length > 0:
+            chunk = os.pread(self._fd, length, offset)
+            if not chunk:
+                break  # end of file
+            chunks.append(chunk)
+            offset += len(chunk)
+            length -= len(chunk)
+        return b"".join(chunks)
+
+    def close(self) -> None:
+        if self._fd >= 0:
+            os.close(self._fd)
+            self._fd = -1
+
+
 class OSFileSystem:
     def open_append(self, path: str) -> OSFile:
         return OSFile(path)
+
+    def open_read(self, path: str) -> OSReader:
+        return OSReader(path)
 
     def read_file(self, path: str) -> bytes:
         with open(path, "rb") as f:

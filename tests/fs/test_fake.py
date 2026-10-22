@@ -142,3 +142,14 @@ def test_paths_must_be_absolute() -> None:
     fs = new_fs()
     with pytest.raises(ValueError):
         fs.open_append("data/a")
+
+
+def test_readers_from_before_a_crash_stop_working() -> None:
+    fs = new_fs()
+    write_safely(fs, "/data/a", b"data")
+    r = fs.open_read("/data/a")
+
+    fs.crash()
+
+    with pytest.raises(OSError):
+        r.read_at(0, 4)

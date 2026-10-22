@@ -141,3 +141,25 @@ def test_open_in_missing_folder(setup: tuple[FileSystem, str]) -> None:
     fs, root = setup
     with pytest.raises(FileNotFoundError):
         fs.open_append(os.path.join(root, "no-such-dir", "a.txt"))
+
+
+def test_read_at_any_offset(setup: tuple[FileSystem, str]) -> None:
+    fs, root = setup
+    path = os.path.join(root, "table")
+    f = fs.open_append(path)
+    f.write(b"0123456789")
+    f.close()
+
+    r = fs.open_read(path)
+    assert r.size == 10
+    assert r.read_at(0, 4) == b"0123"
+    assert r.read_at(6, 3) == b"678"
+    assert r.read_at(8, 100) == b"89"  # short only at the end
+    assert r.read_at(10, 5) == b""
+    r.close()
+
+
+def test_open_read_missing_file(setup: tuple[FileSystem, str]) -> None:
+    fs, root = setup
+    with pytest.raises(FileNotFoundError):
+        fs.open_read(os.path.join(root, "nope"))

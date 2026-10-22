@@ -1,3 +1,3 @@
-from faultline.fs.base import FileSystem, WritableFile
+from faultline.fs.base import FileSystem, ReadableFile, WritableFile
 
-__all__ = ["FileSystem", "WritableFile"]
+__all__ = ["FileSystem", "ReadableFile", "WritableFile"]

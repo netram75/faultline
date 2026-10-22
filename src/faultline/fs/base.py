@@ -32,12 +32,31 @@ class WritableFile(Protocol):
         """Close the file. This does not sync it."""
 
 
+class ReadableFile(Protocol):
+    """A file opened for reading any part of it, like an SSTable."""
+
+    @property
+    def size(self) -> int:
+        """Length of the file in bytes."""
+        ...
+
+    def read_at(self, offset: int, length: int) -> bytes:
+        """Read `length` bytes from `offset`. Returns fewer only at the end of the file."""
+        ...
+
+    def close(self) -> None: ...
+
+
 class FileSystem(Protocol):
     def open_append(self, path: str) -> WritableFile:
         """Open a file for appending, creating it if it does not exist.
 
         The folder must already exist.
         """
+        ...
+
+    def open_read(self, path: str) -> ReadableFile:
+        """Open an existing file for reading. Raises FileNotFoundError if it is missing."""
         ...
 
     def read_file(self, path: str) -> bytes:

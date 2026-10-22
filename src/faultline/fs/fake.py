@@ -82,6 +82,9 @@ class FakeFileSystem:
             self._names[path] = inode
         return FakeFile(self, inode)
 
+    def open_read(self, path: str) -> "FakeReader":
+        return FakeReader(self, self._inode(path))
+
     def read_file(self, path: str) -> bytes:
         return bytes(self._inode(path).data)
 
@@ -146,7 +149,9 @@ class FakeFileSystem:
             raise FileNotFoundError(path)
 
 
-class FakeFile:
+class _Handle:
+    """What open files for writing and for reading have in common."""
+
     def __init__(self, fs: FakeFileSystem, inode: _Inode) -> None:
         self._fs = fs
         self._inode = inode
@@ -156,14 +161,6 @@ class FakeFile:
     @property
     def size(self) -> int:
         return len(self._inode.data)
-
-    def write(self, data: bytes) -> None:
-        self._check_usable()
-        self._inode.data += data
-
-    def sync(self) -> None:
-        self._check_usable()
-        self._inode.sync()
 
     def close(self) -> None:
         self._closed = True
@@ -175,6 +172,22 @@ class FakeFile:
         # This catches tests that forget to reopen files after crash().
         if self._opened_at_crash != self._fs.crash_count:
             raise OSError("file was opened before a crash")
+
+
+class FakeFile(_Handle):
+    def write(self, data: bytes) -> None:
+        self._check_usable()
+        self._inode.data += data
+
+    def sync(self) -> None:
+        self._check_usable()
+        self._inode.sync()
+
+
+class FakeReader(_Handle):
+    def read_at(self, offset: int, length: int) -> bytes:
+        self._check_usable()
+        return bytes(self._inode.data[offset : offset + length])
 
 
 def _clean(path: str) -> str:
