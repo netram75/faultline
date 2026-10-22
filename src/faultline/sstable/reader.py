@@ -1,6 +1,7 @@
 """Reading an SSTable."""
 
 from bisect import bisect_left
+from collections.abc import Iterator
 
 from faultline.entry import Value
 from faultline.fs import FileSystem
@@ -62,6 +63,23 @@ class TableReader:
         if j < len(entries) and entries[j][0] == key:
             return entries[j][1]
         return None
+
+    def __iter__(self) -> Iterator[tuple[bytes, Value]]:
+        """Every entry in key order, tombstones included."""
+        return self.seek(b"")
+
+    def seek(self, key: bytes) -> Iterator[tuple[bytes, Value]]:
+        """Every entry from the first key >= `key` onward.
+
+        Reads one block at a time, so scanning a big table never holds more
+        than one block in memory.
+        """
+        first = bisect_left(self._last_keys, key)
+        for i in range(first, len(self._blocks)):
+            entries = self._read_block(i)
+            # Only the first block can have keys smaller than the one we want
+            start = bisect_left(entries, key, key=lambda entry: entry[0]) if i == first else 0
+            yield from entries[start:]
 
     def close(self) -> None:
         self._file.close()

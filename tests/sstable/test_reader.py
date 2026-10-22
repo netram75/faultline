@@ -76,3 +76,39 @@ def test_tiny_file_is_refused() -> None:
 
     with pytest.raises(CorruptTable):
         TableReader(fs, PATH)
+
+
+def test_scan_returns_everything_in_order() -> None:
+    entries: list[tuple[bytes, Value]] = [
+        (f"k{i:04d}".encode(), TOMBSTONE if i % 7 == 0 else str(i).encode()) for i in range(300)
+    ]
+    fs = write_table(entries, block_size=128)
+    table = TableReader(fs, PATH)
+
+    assert list(table) == entries
+
+
+def test_seek_lands_on_the_first_key_not_smaller() -> None:
+    entries: list[tuple[bytes, Value]] = [(f"k{i:04d}".encode(), b"") for i in range(0, 300, 2)]
+    fs = write_table(entries, block_size=128)
+    table = TableReader(fs, PATH)
+
+    # An exact key, a key that sits between two others, and a key past the end
+    assert next(table.seek(b"k0100"))[0] == b"k0100"
+    assert next(table.seek(b"k0101"))[0] == b"k0102"
+    assert list(table.seek(b"k9999")) == []
+    tail = [k for k, _ in table.seek(b"k0290")]
+    assert tail == [b"k0290", b"k0292", b"k0294", b"k0296", b"k0298"]
+
+
+def test_seek_matches_a_sorted_list_for_random_starts() -> None:
+    rng = random.Random(8)
+    keys = sorted({rng.randbytes(rng.randint(1, 6)) for _ in range(800)})
+    entries: list[tuple[bytes, Value]] = [(k, b"v") for k in keys]
+    fs = write_table(entries, block_size=100)
+    table = TableReader(fs, PATH)
+
+    for _ in range(200):
+        start = rng.randbytes(rng.randint(0, 6))
+        expected = [e for e in entries if e[0] >= start]
+        assert list(table.seek(start)) == expected
