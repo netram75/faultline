@@ -5,8 +5,12 @@ This is where the pieces from the first two days meet:
     write: WAL first, so it survives a crash, then the memtable
     read:  the memtable, then the tables on disk, newest first
 
-When the memtable gets big it is flushed: written out as a new table, after
-which the WAL segments that held it are not needed any more.
+When the memtable gets big it is flushed: written out as a new level 0
+table, after which the WAL segments that held it are not needed any more.
+When level 0 has too many tables, they are compacted into level 1.
+
+    level 0: fresh from the memtable, may overlap, checked newest first
+    level 1: the bottom, never overlap, so a read checks at most one
 
 Later, every node in the Raft cluster keeps its copy of the data in one
 Engine.
@@ -19,6 +23,7 @@ Files in the engine's folder:
 """
 
 import os
+from bisect import bisect_left
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from typing import Self
@@ -27,6 +32,7 @@ from faultline.entry import Tombstone, Value
 from faultline.fs import FileSystem
 from faultline.lsm import manifest
 from faultline.lsm.batch import WriteBatch
+from faultline.lsm.compaction import DEFAULT_TABLE_SIZE, compact
 from faultline.lsm.files import list_tables, table_path
 from faultline.lsm.manifest import Manifest, TableInfo
 from faultline.lsm.merge import merge
@@ -41,6 +47,8 @@ from faultline.wal.writer import DEFAULT_SEGMENT_SIZE
 @dataclass(frozen=True)
 class Options:
     memtable_size: int = 4 * 1024 * 1024  # flush once the memtable is about this big
+    l0_limit: int = 4  # compact once level 0 has this many tables
+    table_size: int = DEFAULT_TABLE_SIZE  # size of the tables compaction writes
     wal_segment_size: int = DEFAULT_SEGMENT_SIZE
 
 
@@ -74,6 +82,8 @@ class Engine:
         self._memtable = memtable
         self._tables: dict[int, TableReader] = {}
         self._level0: list[TableInfo] = []
+        self._level1: list[TableInfo] = []
+        self._level1_largest: list[bytes] = []
         self._manifest = Manifest()
         self._use_manifest(state)
 
@@ -133,7 +143,9 @@ class Engine:
         memtable out from under it.
         """
         sources: list[Iterable[tuple[bytes, Value]]] = [self._memtable.seek(start)]
-        for info in self._level0:  # newest first, as merge() wants
+        # Newest first, as merge() wants. Level 1 is older than all of level 0,
+        # and its tables don't overlap, so their order among themselves doesn't matter.
+        for info in [*self._level0, *self._level1]:
             if info.largest >= start and (end is None or info.smallest < end):
                 sources.append(self._tables[info.number].seek(start))
 
@@ -164,6 +176,11 @@ class Engine:
                 value = self._tables[info.number].get(key)
                 if value is not None:
                     return value
+        # Level 1 is sorted and doesn't overlap: the only table that can hold
+        # the key is the first one whose largest key is >= it
+        i = bisect_left(self._level1_largest, key)
+        if i < len(self._level1) and self._level1[i].smallest <= key:
+            return self._tables[self._level1[i].number].get(key)
         return None
 
     def _flush(self) -> None:
@@ -190,6 +207,41 @@ class Engine:
         )
         _remove_old_segments(self._fs, self._root, self._wal.segment)
         self._memtable = Memtable()
+        if len(self._level0) >= self._options.l0_limit:
+            self._compact()
+
+    def _compact(self) -> None:
+        """Merge all of level 0, plus the level 1 tables it overlaps, into new
+        level 1 tables. See compaction.py for why tombstones can go here."""
+        smallest = min(info.smallest for info in self._level0)
+        largest = max(info.largest for info in self._level0)
+        overlapping = [
+            info for info in self._level1 if info.largest >= smallest and info.smallest <= largest
+        ]
+        # Newest first: level 0 is already in that order, and all of it is
+        # newer than level 1
+        inputs = [*self._level0, *overlapping]
+        first = self._manifest.next_file
+        outputs = compact(
+            self._fs,
+            self._root,
+            [self._tables[info.number] for info in inputs],
+            first,
+            self._options.table_size,
+        )
+
+        # Same rule as flush. If we crash before this save, the outputs are
+        # orphans that open() deletes, and the inputs are still live.
+        gone = {info.number for info in inputs}
+        kept = [info for info in self._manifest.tables if info.number not in gone]
+        self._save_manifest(
+            replace(self._manifest, next_file=first + len(outputs), tables=(*kept, *outputs))
+        )
+        # Nothing points at the inputs now. No sync_dir: if a crash brings one
+        # back, open() sees it is not in the manifest and deletes it again.
+        for number in gone:
+            self._tables.pop(number).close()
+            self._fs.remove(table_path(self._root, number))
 
     def _write_table(self, number: int) -> TableInfo:
         path = table_path(self._root, number)
@@ -217,6 +269,9 @@ class Engine:
         # Newer tables have bigger numbers, and a newer table wins
         level0 = [info for info in state.tables if info.level == 0]
         self._level0 = sorted(level0, key=lambda info: info.number, reverse=True)
+        level1 = [info for info in state.tables if info.level == 1]
+        self._level1 = sorted(level1, key=lambda info: info.smallest)
+        self._level1_largest = [info.largest for info in self._level1]
 
 
 def _wal_dir(root: str) -> str:
@@ -225,7 +280,8 @@ def _wal_dir(root: str) -> str:
 
 def _remove_dead_files(fs: FileSystem, root: str, state: Manifest) -> None:
     """Delete what a crash left behind: tables the manifest doesn't list (a
-    flush that never finished) and segments whose writes are in a table."""
+    flush or compaction that never finished, or compaction inputs it did not
+    get to delete) and segments whose writes are in a table."""
     live = {info.number for info in state.tables}
     for number in list_tables(fs, root):
         if number not in live:

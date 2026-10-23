@@ -1,17 +1,20 @@
 import random
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
 
 from faultline.fs.fake import FakeFileSystem
 from faultline.fs.real import OSFileSystem
+from faultline.lsm import manifest
 from faultline.lsm.batch import WriteBatch
 from faultline.lsm.engine import Engine, Options
+from faultline.sstable.reader import TableReader
 from faultline.wal import record
 
 ROOT = "/db"
-# Flush after every write
-TINY = Options(memtable_size=1)
+# Flush after every write, and never compact
+TINY = Options(memtable_size=1, l0_limit=1000)
 
 
 def table_files(fs: FakeFileSystem) -> list[str]:
@@ -79,7 +82,7 @@ def test_every_write_survives_a_crash() -> None:
 
 def test_full_memtable_is_flushed_to_a_table() -> None:
     fs = FakeFileSystem()
-    engine = Engine.open(fs, ROOT, Options(memtable_size=1024))
+    engine = Engine.open(fs, ROOT, Options(memtable_size=1024, l0_limit=1000))
 
     for i in range(100):
         engine.put(f"key{i:03d}".encode(), b"v" * 20)
@@ -169,8 +172,9 @@ def test_works_on_the_real_disk(tmp_path: Path) -> None:
 def test_matches_a_dict(seed: int) -> None:
     rng = random.Random(seed)
     fs = FakeFileSystem(seed)
-    # Small sizes, so the log rolls over and the memtable flushes many times
-    options = Options(memtable_size=500, wal_segment_size=200)
+    # Small sizes, so the log rolls over, the memtable flushes and level 0
+    # gets compacted many times
+    options = Options(memtable_size=500, l0_limit=3, table_size=300, wal_segment_size=200)
     engine = Engine.open(fs, ROOT, options)
     model: dict[bytes, bytes] = {}
 
@@ -244,4 +248,59 @@ def test_scan_matches_a_dict(seed: int) -> None:
         start, end = sorted([bytes([rng.randrange(52)]), bytes([rng.randrange(52)])])
         expected = sorted((k, v) for k, v in model.items() if start <= k < end)
         assert engine.scan(start, end) == expected
+    assert engine.scan() == sorted(model.items())
+
+
+def test_full_level_0_is_compacted_into_level_1() -> None:
+    fs = FakeFileSystem()
+    engine = Engine.open(fs, ROOT, Options(memtable_size=1, l0_limit=3))
+
+    engine.put(b"a", b"1")
+    engine.put(b"b", b"2")
+    assert len(table_files(fs)) == 2
+    engine.put(b"c", b"3")  # third table, so compaction runs
+
+    state = manifest.load(fs, ROOT)
+    assert state is not None
+    assert [(t.level, t.smallest, t.largest) for t in state.tables] == [(1, b"a", b"c")]
+    # The three level 0 tables are gone from the folder too
+    assert table_files(fs) == [f"{state.tables[0].number:08d}.sst"]
+    assert [engine.get(k) for k in [b"a", b"b", b"c"]] == [b"1", b"2", b"3"]
+
+
+def test_compaction_throws_deleted_keys_away() -> None:
+    fs = FakeFileSystem()
+    engine = Engine.open(fs, ROOT, Options(memtable_size=1, l0_limit=3))
+
+    engine.put(b"gone", b"x")
+    engine.put(b"kept", b"y")
+    engine.delete(b"gone")  # third table, so compaction runs
+
+    everything_on_disk = []
+    for name in table_files(fs):
+        everything_on_disk += list(TableReader(fs, f"{ROOT}/{name}"))
+    assert everything_on_disk == [(b"kept", b"y")]
+    assert engine.get(b"gone") is None
+
+
+def test_level_1_tables_never_overlap() -> None:
+    rng = random.Random(7)
+    fs = FakeFileSystem()
+    engine = Engine.open(fs, ROOT, Options(memtable_size=400, l0_limit=2, table_size=200))
+    model: dict[bytes, bytes] = {}
+    for _ in range(2000):
+        key = rng.randbytes(2)
+        model[key] = rng.randbytes(10)
+        engine.put(key, model[key])
+
+    state = manifest.load(fs, ROOT)
+    assert state is not None
+    level1 = sorted((t for t in state.tables if t.level == 1), key=lambda t: t.smallest)
+    assert len(level1) > 10
+    for before, after in pairwise(level1):
+        assert before.largest < after.smallest
+    # Keys that fall in the gaps between level 1 tables must not be found
+    for _ in range(500):
+        key = rng.randbytes(2)
+        assert engine.get(key) == model.get(key)
     assert engine.scan() == sorted(model.items())
