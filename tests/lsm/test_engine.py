@@ -193,3 +193,55 @@ def test_matches_a_dict(seed: int) -> None:
 
     for k in range(40):
         assert engine.get(bytes([k])) == model.get(bytes([k]))
+
+
+def test_scan_sees_the_newest_value_of_each_key() -> None:
+    fs = FakeFileSystem()
+    engine = Engine.open(fs, ROOT, TINY)
+    engine.put(b"a", b"old")
+    engine.put(b"b", b"old")
+    engine.put(b"c", b"old")
+    engine.close()
+    engine = Engine.open(fs, ROOT)  # these stay in the memtable
+    engine.put(b"a", b"new")
+    engine.delete(b"b")
+    engine.put(b"d", b"new")
+
+    assert engine.scan() == [(b"a", b"new"), (b"c", b"old"), (b"d", b"new")]
+
+
+def test_scan_range_and_limit() -> None:
+    engine = Engine.open(FakeFileSystem(), ROOT, Options(memtable_size=300))
+    for i in range(20):
+        engine.put(bytes([i]), b"v")
+
+    def keys(found: list[tuple[bytes, bytes]]) -> list[int]:
+        return [k[0] for k, _ in found]
+
+    assert keys(engine.scan(bytes([5]), bytes([9]))) == [5, 6, 7, 8]
+    assert keys(engine.scan(bytes([17]))) == [17, 18, 19]
+    assert keys(engine.scan(end=bytes([2]))) == [0, 1]
+    assert keys(engine.scan(bytes([3]), limit=2)) == [3, 4]
+    assert engine.scan(limit=0) == []
+    assert engine.scan(bytes([9]), bytes([9])) == []
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_scan_matches_a_dict(seed: int) -> None:
+    rng = random.Random(seed)
+    engine = Engine.open(FakeFileSystem(seed), ROOT, Options(memtable_size=400))
+    model: dict[bytes, bytes] = {}
+    for _ in range(300):
+        key = bytes([rng.randrange(50)])
+        if rng.random() < 0.3:
+            engine.delete(key)
+            model.pop(key, None)
+        else:
+            model[key] = rng.randbytes(4)
+            engine.put(key, model[key])
+
+    for _ in range(20):
+        start, end = sorted([bytes([rng.randrange(52)]), bytes([rng.randrange(52)])])
+        expected = sorted((k, v) for k, v in model.items() if start <= k < end)
+        assert engine.scan(start, end) == expected
+    assert engine.scan() == sorted(model.items())

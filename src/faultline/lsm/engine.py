@@ -19,6 +19,7 @@ Files in the engine's folder:
 """
 
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from typing import Self
 
@@ -28,6 +29,7 @@ from faultline.lsm import manifest
 from faultline.lsm.batch import WriteBatch
 from faultline.lsm.files import list_tables, table_path
 from faultline.lsm.manifest import Manifest, TableInfo
+from faultline.lsm.merge import merge
 from faultline.memtable import Memtable
 from faultline.sstable.reader import TableReader
 from faultline.sstable.writer import TableWriter
@@ -119,6 +121,31 @@ class Engine:
         if value is None or isinstance(value, Tombstone):
             return None
         return value
+
+    def scan(
+        self, start: bytes = b"", end: bytes | None = None, limit: int | None = None
+    ) -> list[tuple[bytes, bytes]]:
+        """Keys from `start` up to but not including `end`, in order, with
+        their values. Stops after `limit` keys if one is given.
+
+        Returns a list, not an iterator, so the caller can write while using
+        the result. A flush in the middle of a lazy scan would swap the
+        memtable out from under it.
+        """
+        sources: list[Iterable[tuple[bytes, Value]]] = [self._memtable.seek(start)]
+        for info in self._level0:  # newest first, as merge() wants
+            if info.largest >= start and (end is None or info.smallest < end):
+                sources.append(self._tables[info.number].seek(start))
+
+        found: list[tuple[bytes, bytes]] = []
+        for key, value in merge(sources):
+            if len(found) == limit or (end is not None and key >= end):
+                break
+            # merge() keeps tombstones so a delete still hides older copies of
+            # its key. Now that it has, we skip it.
+            if not isinstance(value, Tombstone):
+                found.append((key, value))
+        return found
 
     def close(self) -> None:
         """Close the files. Nothing to flush: everything is in the WAL already."""
