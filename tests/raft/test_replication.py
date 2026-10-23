@@ -24,6 +24,16 @@ def new_leader(fs: FakeFileSystem | None = None) -> Node:
     return node
 
 
+def leader_with_entries(count: int) -> Node:
+    """A leader that already had `count` entries in its log when it won. It
+    knows nothing about the followers yet, so it guesses they have them all."""
+    fs = FakeFileSystem()
+    first = new_leader(fs)
+    for i in range(count):
+        first.propose(f"cmd{i}".encode())
+    return new_leader(fs)  # restarted on the same disk, and elected again
+
+
 def appends_to(node: Node, peer: int) -> list[AppendRequest]:
     return [
         m.body
@@ -140,7 +150,7 @@ def test_no_when_the_previous_entry_is_missing() -> None:
 
     sent = append(node, 2, (3, 2), Entry(2, b"x"))
 
-    assert sent == [Message(2, 1, 2, AppendReply(success=False, match_index=0))]
+    assert sent == [Message(2, 1, 2, AppendReply(success=False, match_index=1))]
     assert node.log.last_index == 1
 
 
@@ -184,3 +194,56 @@ def test_a_repeated_message_changes_nothing() -> None:
 
     assert node.log.entries_from(1) == (Entry(1, b"a"),)
     assert fs.steps == steps  # not even a write to disk
+
+
+def test_hint_skips_back_over_a_whole_suspect_term() -> None:
+    node = follower_with_log(1, 1, 2, 2, 2)
+
+    sent = append(node, 4, (5, 3), Entry(4, b"x"))
+
+    # Entries 3 to 5 have term 2, which the leader does not have at 5. All of
+    # term 2 is suspect, so try again right after entry 2.
+    assert [m.body for m in sent] == [AppendReply(success=False, match_index=2)]
+
+
+def test_leader_jumps_back_to_the_hint_and_tries_again_at_once() -> None:
+    leader = leader_with_entries(10)
+
+    leader.step(Message(2, 1, leader.term, AppendReply(success=False, match_index=3)))
+
+    (request,) = appends_to(leader, 2)
+    assert request.prev_log_index == 3
+    assert request.entries == leader.log.entries_from(4)
+
+
+def test_leader_never_backs_up_past_what_matches() -> None:
+    leader = new_leader()
+    for i in range(5):
+        leader.propose(f"cmd{i}".encode())
+    leader.take_messages()
+    leader.step(Message(2, 1, leader.term, AppendReply(success=True, match_index=4)))
+
+    # A late failure from before the logs matched
+    leader.step(Message(2, 1, leader.term, AppendReply(success=False, match_index=0)))
+
+    (request,) = appends_to(leader, 2)
+    assert request.prev_log_index == 4
+
+
+def test_an_empty_follower_catches_up_in_one_round_trip() -> None:
+    leader = leader_with_entries(50)
+    follower = new_node(2)
+
+    # The leader starts by guessing the follower is up to date
+    leader.tick()
+    leader.tick()
+    rounds = 0
+    while follower.log.last_index < leader.log.last_index:
+        for message in appends_to(leader, 2):
+            follower.step(Message(1, 2, leader.term, message))
+        for reply in follower.take_messages():
+            leader.step(reply)
+        rounds += 1
+
+    assert rounds <= 2
+    assert follower.log.entries_from(1) == leader.log.entries_from(1)

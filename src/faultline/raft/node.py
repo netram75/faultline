@@ -283,12 +283,30 @@ class Node:
         # matching property (section 5.3) says everything before it matches
         # too, and the new entries can go right after it.
         if not self.log.matches(request.prev_log_index, request.prev_log_term):
-            self._send(leader, AppendReply(success=False, match_index=0))
+            hint = self._mismatch_hint(request.prev_log_index)
+            self._send(leader, AppendReply(success=False, match_index=hint))
             return
         self._append_new_entries(request.prev_log_index, request.entries)
         # log.append() synced the entries, so this promise holds after a crash
         last_new = request.prev_log_index + len(request.entries)
         self._send(leader, AppendReply(success=True, match_index=last_new))
+
+    def _mismatch_hint(self, prev_index: int) -> int:
+        """Where the leader should try next, after our log failed its check at
+        `prev_index`. Always before prev_index, so every failed try moves the
+        leader back, and usually by a lot (Raft paper, end of section 5.3):
+
+        * our log is shorter: start from where it ends
+        * our entry at prev_index has another term: every entry of that term
+          is suspect, so skip back to just before the first of them
+        """
+        if prev_index > self.log.last_index:
+            return self.log.last_index
+        suspect_term = self.log.term_at(prev_index)
+        index = prev_index
+        while index > 1 and self.log.term_at(index - 1) == suspect_term:
+            index -= 1
+        return index - 1
 
     def _append_new_entries(self, prev_index: int, entries: tuple[Entry, ...]) -> None:
         """Raft paper, figure 2 (AppendEntries steps 3 and 4). Skip entries we
@@ -309,9 +327,15 @@ class Node:
             return
 
     def _on_append_reply(self, follower: NodeId, reply: AppendReply) -> None:
-        if self.role is not Role.LEADER or not reply.success:
+        if self.role is not Role.LEADER:
             return
-        self._progress[follower].on_success(reply.match_index)
+        progress = self._progress[follower]
+        if reply.success:
+            progress.on_success(reply.match_index)
+        else:
+            progress.on_failure(reply.match_index)
+            # Try again from the new spot straight away, not at the next heartbeat
+            self._send_append(follower)
 
     def _become_leader(self) -> None:
         self.role = Role.LEADER
