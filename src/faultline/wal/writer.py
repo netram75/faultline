@@ -36,7 +36,7 @@ class WalWriter:
 
     def append(self, payload: bytes) -> None:
         if self._file.size >= self._max_segment_size:
-            self._start_next_segment()
+            self.start_next_segment()
         self._file.write(record.encode(payload))
 
     def sync(self) -> None:
@@ -46,7 +46,13 @@ class WalWriter:
     def close(self) -> None:
         self._file.close()
 
-    def _start_next_segment(self) -> None:
+    def start_next_segment(self) -> None:
+        """Send new records to a fresh segment, even if this one is not full.
+
+        The storage engine calls this when it flushes the memtable, so the old
+        segments hold exactly the writes in that memtable and can be deleted
+        once it is safe on disk.
+        """
         # Sync the old segment before the new one exists. That way only the
         # newest segment can ever end in a half-written record, and recovery
         # can treat a bad record anywhere else as real damage.

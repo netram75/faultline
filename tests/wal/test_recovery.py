@@ -122,3 +122,13 @@ def test_works_on_the_real_disk(tmp_path: Path) -> None:
     records, _ = open_wal(fs, directory)
 
     assert records == [b"on a real disk"]
+
+
+def test_empty_folder_starts_at_the_given_segment() -> None:
+    fs = new_fs()
+
+    records, wal = open_wal(fs, WAL, first_segment=7)
+
+    assert records == []
+    assert wal.segment == 7
+    assert fs.list_dir(WAL) == ["00000007.wal"]

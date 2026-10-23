@@ -88,3 +88,17 @@ def test_old_segments_are_synced_before_rolling_over() -> None:
     fs.crash()
 
     assert read_records(fs.read_file(f"{WAL}/00000001.wal")) == [b"a" * 20]
+
+
+def test_start_next_segment_on_request() -> None:
+    fs = new_fs()
+    wal = WalWriter(fs, WAL)
+    wal.append(b"old")
+
+    wal.start_next_segment()
+    wal.append(b"new")
+    wal.sync()
+
+    assert wal.segment == 2
+    assert read_records(fs.read_file(f"{WAL}/00000001.wal")) == [b"old"]
+    assert read_records(fs.read_file(f"{WAL}/00000002.wal")) == [b"new"]

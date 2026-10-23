@@ -47,11 +47,14 @@ def open_wal(
     fs: FileSystem,
     directory: str,
     max_segment_size: int = DEFAULT_SEGMENT_SIZE,
+    first_segment: int = 1,
 ) -> tuple[list[bytes], WalWriter]:
     """Open the WAL in `directory`, creating it if needed.
 
     Returns every record that survived, oldest first, and a writer that
-    appends after them.
+    appends after them. If the folder has no segments, writing starts at
+    `first_segment`. The storage engine uses that so segment numbers never
+    go back to ones it has already thrown away.
     """
     if not fs.exists(directory):
         fs.mkdir(directory)
@@ -59,7 +62,7 @@ def open_wal(
 
     segments = list_segments(fs, directory)
     if not segments:
-        return [], WalWriter(fs, directory, 1, max_segment_size)
+        return [], WalWriter(fs, directory, first_segment, max_segment_size)
 
     records: list[bytes] = []
     for number in segments:
