@@ -129,6 +129,11 @@ class Node:
             self._become_follower(message.term)
         elif message.term < self.term:
             self._answer_old_message(message)
+            return
+
+        match message.body:
+            case VoteRequest() as request:
+                self._on_vote_request(message.sender, request)
 
     def take_messages(self) -> list[Message]:
         """Everything the node wants sent since the last call, in order."""
@@ -143,6 +148,22 @@ class Node:
         self._reset_election_timer()
         for peer in self._others:
             self._send(peer, VoteRequest(self.log.last_index, self.log.last_term))
+
+    def _on_vote_request(self, candidate: NodeId, request: VoteRequest) -> None:
+        """Raft paper, figure 2 (RequestVote): vote for at most one candidate
+        per term, and only for one whose log is at least as up to date as
+        ours (section 5.4.1). The second rule is what stops a node that
+        missed committed entries from ever becoming leader."""
+        free_to_vote = self.voted_for in (None, candidate)
+        up_to_date = self.log.is_up_to_date(request.last_log_index, request.last_log_term)
+        granted = free_to_vote and up_to_date
+        if granted:
+            # Saved before the reply goes out. A node that forgot its vote in
+            # a restart could vote twice in one term and elect two leaders.
+            self._save(HardState(self.term, candidate))
+            # The candidate we voted for may win. Give it time to tell us.
+            self._reset_election_timer()
+        self._send(candidate, VoteReply(granted))
 
     def _become_follower(self, term: int) -> None:
         if term != self.term:

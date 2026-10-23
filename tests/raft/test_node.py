@@ -9,6 +9,7 @@ from faultline.raft.hard_state import HardState
 from faultline.raft.messages import (
     AppendReply,
     AppendRequest,
+    Entry,
     Message,
     VoteReply,
     VoteRequest,
@@ -145,3 +146,115 @@ def test_restart_keeps_term_and_vote() -> None:
     assert restarted.term == 1
     assert restarted.voted_for == 1
     assert restarted.role is Role.FOLLOWER
+
+
+def give_log(node: Node, *terms: int) -> None:
+    node.log.append([Entry(term, b"x") for term in terms])
+
+
+def test_votes_for_the_first_candidate_that_asks() -> None:
+    fs = FakeFileSystem()
+    node = new_node(fs=fs)
+
+    node.step(Message(2, 1, 1, VoteRequest(0, 0)))
+
+    assert node.take_messages() == [Message(1, 2, 1, VoteReply(granted=True))]
+    assert node.voted_for == 2
+    # The vote is on disk before the reply leaves
+    fs.crash()
+    assert hard_state.load(fs, "/node1") == HardState(1, 2)
+
+
+def test_only_one_vote_per_term() -> None:
+    node = new_node()
+    node.step(Message(2, 1, 1, VoteRequest(0, 0)))
+    node.take_messages()
+
+    node.step(Message(3, 1, 1, VoteRequest(0, 0)))
+
+    assert node.take_messages() == [Message(1, 3, 1, VoteReply(granted=False))]
+    assert node.voted_for == 2
+
+
+def test_same_candidate_asking_again_gets_yes_again() -> None:
+    # The first reply may have been lost
+    node = new_node()
+    node.step(Message(2, 1, 1, VoteRequest(0, 0)))
+    node.take_messages()
+
+    node.step(Message(2, 1, 1, VoteRequest(0, 0)))
+
+    assert node.take_messages() == [Message(1, 2, 1, VoteReply(granted=True))]
+
+
+def test_a_new_term_frees_the_vote() -> None:
+    node = new_node()
+    node.step(Message(2, 1, 1, VoteRequest(0, 0)))
+    node.take_messages()
+
+    node.step(Message(3, 1, 2, VoteRequest(0, 0)))
+
+    assert node.take_messages() == [Message(1, 3, 2, VoteReply(granted=True))]
+    assert (node.term, node.voted_for) == (2, 3)
+
+
+def test_candidate_does_not_vote_for_a_rival() -> None:
+    node = new_node()
+    tick_until_election(node)
+    node.take_messages()
+
+    node.step(Message(2, 1, node.term, VoteRequest(0, 0)))
+
+    assert node.take_messages() == [Message(1, 2, node.term, VoteReply(granted=False))]
+
+
+def test_no_vote_for_a_candidate_with_an_older_last_term() -> None:
+    node = new_node()
+    give_log(node, 1, 2)
+
+    node.step(Message(2, 1, 3, VoteRequest(last_log_index=5, last_log_term=1)))
+
+    assert node.take_messages() == [Message(1, 2, 3, VoteReply(granted=False))]
+    assert node.voted_for is None
+
+
+def test_no_vote_for_a_candidate_with_a_shorter_log() -> None:
+    node = new_node()
+    give_log(node, 1, 2)
+
+    node.step(Message(2, 1, 3, VoteRequest(last_log_index=1, last_log_term=2)))
+
+    assert node.take_messages() == [Message(1, 2, 3, VoteReply(granted=False))]
+
+
+def test_vote_for_a_candidate_with_a_newer_last_term() -> None:
+    node = new_node()
+    give_log(node, 1, 1, 1)
+
+    node.step(Message(2, 1, 3, VoteRequest(last_log_index=1, last_log_term=2)))
+
+    assert node.take_messages() == [Message(1, 2, 3, VoteReply(granted=True))]
+
+
+def test_voting_resets_the_election_timer() -> None:
+    node = new_node()
+    for _ in range(CONFIG.election_ticks - 1):
+        node.tick()
+
+    node.step(Message(2, 1, 1, VoteRequest(0, 0)))
+    for _ in range(CONFIG.election_ticks - 1):
+        node.tick()
+
+    assert node.role is Role.FOLLOWER
+
+
+def test_vote_survives_a_restart() -> None:
+    fs = FakeFileSystem()
+    node = new_node(fs=fs)
+    node.step(Message(2, 1, 1, VoteRequest(0, 0)))
+
+    fs.crash()
+    restarted = new_node(fs=fs)
+    restarted.step(Message(3, 1, 1, VoteRequest(0, 0)))
+
+    assert restarted.take_messages() == [Message(1, 3, 1, VoteReply(granted=False))]
