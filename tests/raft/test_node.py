@@ -258,3 +258,112 @@ def test_vote_survives_a_restart() -> None:
     restarted.step(Message(3, 1, 1, VoteRequest(0, 0)))
 
     assert restarted.take_messages() == [Message(1, 3, 1, VoteReply(granted=False))]
+
+
+def elect(node: Node) -> None:
+    """Make `node` win an election by handing it the votes."""
+    tick_until_election(node)
+    node.take_messages()
+    for voter in PEERS:
+        if voter != node.id:
+            node.step(Message(voter, node.id, node.term, VoteReply(granted=True)))
+
+
+def heartbeat(node: Node) -> AppendRequest:
+    return AppendRequest(node.log.last_index, node.log.last_term, (), commit_index=0)
+
+
+def test_majority_of_votes_wins() -> None:
+    node = new_node()
+    tick_until_election(node)
+    node.take_messages()
+
+    node.step(Message(2, 1, 1, VoteReply(granted=True)))
+
+    assert node.role is Role.LEADER
+    assert node.leader == 1
+    # Heartbeats go out straight away
+    assert node.take_messages() == [
+        Message(1, 2, 1, heartbeat(node)),
+        Message(1, 3, 1, heartbeat(node)),
+    ]
+
+
+def test_no_votes_no_win() -> None:
+    node = new_node()
+    tick_until_election(node)
+
+    node.step(Message(2, 1, 1, VoteReply(granted=False)))
+    node.step(Message(3, 1, 1, VoteReply(granted=False)))
+
+    assert node.role is Role.CANDIDATE
+
+
+def test_a_vote_counts_once() -> None:
+    fs = FakeFileSystem()
+    node = Node.open(fs, "/node1", 1, [1, 2, 3, 4, 5], CONFIG)
+    tick_until_election(node)
+
+    node.step(Message(2, 1, 1, VoteReply(granted=True)))
+    node.step(Message(2, 1, 1, VoteReply(granted=True)))
+
+    assert node.role is Role.CANDIDATE
+
+
+def test_cluster_of_one_elects_itself() -> None:
+    node = Node.open(FakeFileSystem(), "/solo", 1, [1], CONFIG)
+
+    tick_until_election(node)
+
+    assert node.role is Role.LEADER
+    assert node.term == 1
+    assert node.take_messages() == []
+
+
+def test_leader_sends_heartbeats_and_never_times_out() -> None:
+    node = new_node()
+    elect(node)
+    node.take_messages()
+
+    for _ in range(10 * CONFIG.election_ticks):
+        node.tick()
+
+    assert node.role is Role.LEADER
+    assert node.term == 1
+    sent = node.take_messages()
+    expected = 10 * CONFIG.election_ticks // CONFIG.heartbeat_ticks * 2
+    assert len(sent) == expected
+    assert all(isinstance(m.body, AppendRequest) for m in sent)
+
+
+def test_heartbeats_keep_a_follower_from_running() -> None:
+    node = new_node()
+
+    for _ in range(10 * CONFIG.election_ticks):
+        node.tick()
+        node.step(Message(2, 1, 1, AppendRequest(0, 0, (), 0)))
+
+    assert node.role is Role.FOLLOWER
+    assert node.leader == 2
+    assert node.term == 1
+
+
+def test_candidate_gives_up_when_someone_else_wins() -> None:
+    node = new_node()
+    tick_until_election(node)
+
+    node.step(Message(2, 1, node.term, AppendRequest(0, 0, (), 0)))
+
+    assert node.role is Role.FOLLOWER
+    assert node.leader == 2
+
+
+def test_leader_steps_down_for_a_bigger_term() -> None:
+    node = new_node()
+    elect(node)
+
+    node.step(Message(3, 1, 7, AppendRequest(0, 0, (), 0)))
+
+    assert node.role is Role.FOLLOWER
+    assert node.term == 7
+    assert node.leader == 3

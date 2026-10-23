@@ -82,8 +82,10 @@ class Node:
         self._rng = random.Random(seed)
         self._state = state
         self._outbox: list[Message] = []
+        self._votes: set[NodeId] = set()  # who voted for us, while a candidate
         self._election_elapsed = 0
         self._election_timeout = 0
+        self._heartbeat_elapsed = 0
         self._reset_election_timer()
 
     @classmethod
@@ -115,6 +117,12 @@ class Node:
         return self._state.voted_for
 
     def tick(self) -> None:
+        if self.role is Role.LEADER:
+            # A leader never times out. It keeps reminding everyone it is there.
+            self._heartbeat_elapsed += 1
+            if self._heartbeat_elapsed >= self._config.heartbeat_ticks:
+                self._send_heartbeats()
+            return
         self._election_elapsed += 1
         if self._election_elapsed >= self._election_timeout:
             self._start_election()
@@ -134,6 +142,10 @@ class Node:
         match message.body:
             case VoteRequest() as request:
                 self._on_vote_request(message.sender, request)
+            case VoteReply() as reply:
+                self._on_vote_reply(message.sender, reply)
+            case AppendRequest() as request:
+                self._on_append_request(message.sender, request)
 
     def take_messages(self) -> list[Message]:
         """Everything the node wants sent since the last call, in order."""
@@ -146,6 +158,10 @@ class Node:
         self.role = Role.CANDIDATE
         self.leader = None
         self._reset_election_timer()
+        self._votes = {self.id}
+        if self._is_majority(self._votes):
+            self._become_leader()  # a cluster of one
+            return
         for peer in self._others:
             self._send(peer, VoteRequest(self.log.last_index, self.log.last_term))
 
@@ -165,6 +181,41 @@ class Node:
             self._reset_election_timer()
         self._send(candidate, VoteReply(granted))
 
+    def _on_vote_reply(self, voter: NodeId, reply: VoteReply) -> None:
+        # Replies from older terms never get here, and a bigger term has
+        # already made us a follower. So a reply we see as a candidate is for
+        # this election.
+        if self.role is not Role.CANDIDATE or not reply.granted:
+            return
+        # A set, so a reply that arrives twice still counts once
+        self._votes.add(voter)
+        if self._is_majority(self._votes):
+            self._become_leader()
+
+    def _on_append_request(self, leader: NodeId, request: AppendRequest) -> None:
+        # Same term as ours: bigger terms were taken on above. Only one node
+        # can win a term (each node votes once, and a win needs a majority),
+        # so the sender is that term's leader, and we lost or never ran.
+        assert self.role is not Role.LEADER, f"two leaders in term {self.term}"
+        self.role = Role.FOLLOWER
+        self.leader = leader
+        self._reset_election_timer()
+
+    def _become_leader(self) -> None:
+        self.role = Role.LEADER
+        self.leader = self.id
+        # Tell everyone at once, before another node times out and runs
+        self._send_heartbeats()
+
+    def _send_heartbeats(self) -> None:
+        """An append with no entries. It says "I am the leader for this term",
+        and every follower that gets it resets its election timer."""
+        self._heartbeat_elapsed = 0
+        for peer in self._others:
+            self._send(
+                peer, AppendRequest(self.log.last_index, self.log.last_term, (), commit_index=0)
+            )
+
     def _become_follower(self, term: int) -> None:
         if term != self.term:
             self._save(HardState(term, None))
@@ -181,6 +232,9 @@ class Node:
                 self._send(message.sender, VoteReply(granted=False))
             case AppendRequest():
                 self._send(message.sender, AppendReply(success=False, match_index=0))
+
+    def _is_majority(self, nodes: set[NodeId]) -> bool:
+        return 2 * len(nodes) > len(self._others) + 1
 
     def _reset_election_timer(self) -> None:
         # Random, so that nodes rarely time out together and split the vote
