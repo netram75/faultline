@@ -14,7 +14,7 @@ writes on purpose, then checks that every answer the database gave was correct.
 - [x] Write-ahead log that survives crashes ([how it works](docs/wal.md))
 - [x] Memtable, sorted disk files (SSTables) and bloom filters ([how they work](docs/sstable.md))
 - [x] Storage engine (LSM tree): flush, compaction, crash recovery ([how it works](docs/lsm.md))
-- [ ] Raft: leader election and log replication
+- [ ] Raft: leader election ([how it works](docs/raft.md)) and log replication
 - [ ] Database on top of Raft: sessions, safe reads, snapshots
 - [ ] Fault simulator: fake network, fake disk, fake clock, one seed per run
 - [ ] Correctness checker (linearizability) and a bug hunt
@@ -31,6 +31,7 @@ src/faultline/
   memtable/  new writes in memory: skip list and memtable
   sstable/   sorted files on disk: blocks, bloom filter, writer, reader
   lsm/       the storage engine: batches, manifest, flush, compaction
+  raft/      Raft: messages, saved term and vote, the log, the node
   entry.py   the tombstone that marks a deleted key
 tests/    one folder per package, same names
 docs/     how each part works and why
