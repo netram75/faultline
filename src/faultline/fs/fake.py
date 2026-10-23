@@ -9,6 +9,12 @@ crash() throws the first view away and keeps the second, like a power cut.
 Tests use this to answer the one question that matters for storage code:
 after a crash, is everything we promised to keep still there?
 
+crash() can only happen between two calls. To crash in the middle of
+something, like halfway through a flush, use cut_power_after(n): the disk
+lets n more changes through, then the next one raises PowerCut instead of
+happening, and the disk crashes. Trying every n walks a crash through every
+step of an operation.
+
 What a crash does to things that were not synced:
 
 * Unsynced bytes at the end of a file can be lost, kept, or kept in part.
@@ -48,9 +54,15 @@ class _Inode:
         self.synced = bytes(self.data)
 
 
+class PowerCut(Exception):
+    """The power cut planned with cut_power_after() just happened."""
+
+
 class FakeFileSystem:
     def __init__(self, seed: int = 0) -> None:
         self.crash_count = 0
+        self.steps = 0  # calls so far that could change the disk
+        self._steps_left: int | None = None
         self._rng = random.Random(seed)
         self._dirs = {"/"}
         self._names: dict[str, _Inode] = {}  # what the program sees
@@ -71,7 +83,18 @@ class FakeFileSystem:
                 seen.add(id(inode))
                 inode.crash(self._rng)
 
+    def cut_power_after(self, steps: int) -> None:
+        """Let `steps` more changes happen, then crash on the next one.
+
+        Changes are calls to write, sync, truncate, rename, remove, mkdir,
+        sync_dir and open_append. The one that hits the cut raises PowerCut
+        without doing anything, and the disk crashes. After that the disk
+        works normally again, with no cut planned.
+        """
+        self._steps_left = steps
+
     def open_append(self, path: str) -> "FakeFile":
+        self._step()
         path = _clean(path)
         self._need_dir(posixpath.dirname(path))
         if path in self._dirs:
@@ -89,11 +112,13 @@ class FakeFileSystem:
         return bytes(self._inode(path).data)
 
     def truncate(self, path: str, size: int) -> None:
+        self._step()
         inode = self._inode(path)
         del inode.data[size:]
         inode.sync()
 
     def rename(self, src: str, dst: str) -> None:
+        self._step()
         src, dst = _clean(src), _clean(dst)
         inode = self._inode(src)
         self._need_dir(posixpath.dirname(dst))
@@ -101,6 +126,7 @@ class FakeFileSystem:
         self._names[dst] = inode
 
     def remove(self, path: str) -> None:
+        self._step()
         path = _clean(path)
         self._inode(path)
         del self._names[path]
@@ -120,6 +146,7 @@ class FakeFileSystem:
         return path in self._names or path in self._dirs
 
     def mkdir(self, path: str) -> None:
+        self._step()
         path = _clean(path)
         while path not in self._dirs:
             if path in self._names:
@@ -128,6 +155,7 @@ class FakeFileSystem:
             path = posixpath.dirname(path)
 
     def sync_dir(self, path: str) -> None:
+        self._step()
         path = _clean(path)
         self._need_dir(path)
         for name in [*self._names, *self._durable_names]:
@@ -137,6 +165,17 @@ class FakeFileSystem:
                 self._durable_names[name] = self._names[name]
             else:
                 self._durable_names.pop(name, None)
+
+    def _step(self) -> None:
+        self.steps += 1
+        if self._steps_left is None:
+            return
+        if self._steps_left > 0:
+            self._steps_left -= 1
+            return
+        self._steps_left = None
+        self.crash()
+        raise PowerCut(f"power cut at step {self.steps}")
 
     def _inode(self, path: str) -> _Inode:
         inode = self._names.get(_clean(path))
@@ -177,10 +216,12 @@ class _Handle:
 class FakeFile(_Handle):
     def write(self, data: bytes) -> None:
         self._check_usable()
+        self._fs._step()
         self._inode.data += data
 
     def sync(self) -> None:
         self._check_usable()
+        self._fs._step()
         self._inode.sync()
 
 

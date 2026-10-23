@@ -2,7 +2,7 @@
 
 import pytest
 
-from faultline.fs.fake import FakeFileSystem
+from faultline.fs.fake import FakeFileSystem, PowerCut
 
 
 def new_fs(seed: int = 0) -> FakeFileSystem:
@@ -153,3 +153,63 @@ def test_readers_from_before_a_crash_stop_working() -> None:
 
     with pytest.raises(OSError):
         r.read_at(0, 4)
+
+
+def test_steps_count_every_change() -> None:
+    fs = new_fs()
+    start = fs.steps
+
+    write_safely(fs, "/data/a", b"data")  # open, write, sync, sync_dir
+    fs.read_file("/data/a")  # reads don't count
+    fs.list_dir("/data")
+
+    assert fs.steps == start + 4
+
+
+def test_power_cut_stops_the_change_it_lands_on() -> None:
+    fs = new_fs()
+    f = fs.open_append("/data/a")
+    f.write(b"synced")
+    f.sync()
+    fs.sync_dir("/data")
+
+    fs.cut_power_after(1)
+    f.write(b" kept for now")  # step 1 goes through
+    with pytest.raises(PowerCut):
+        f.sync()  # step 2 is the cut, so this sync never happens
+
+    assert fs.crash_count == 1
+    # The unsynced write may survive in part, but the synced part always does
+    assert fs.read_file("/data/a").startswith(b"synced")
+    with pytest.raises(OSError):
+        f.write(b"x")  # the old handle died with the "process"
+
+
+def test_disk_works_again_after_the_cut() -> None:
+    fs = new_fs()
+    fs.cut_power_after(0)
+    with pytest.raises(PowerCut):
+        fs.mkdir("/data/new")
+    assert not fs.exists("/data/new")
+
+    write_safely(fs, "/data/a", b"data")  # no second cut
+
+    assert fs.read_file("/data/a") == b"data"
+
+
+def test_cut_at_every_step_of_a_safe_write() -> None:
+    # The whole point of the feature: walk a crash through every step of an
+    # operation and check each outcome
+    for n in range(4):
+        fs = new_fs()
+        fs.cut_power_after(n)
+        with pytest.raises(PowerCut):
+            write_safely(fs, "/data/a", b"data")
+        # Until sync_dir (step 4) is done, the new name can be lost
+        assert not fs.exists("/data/a")
+
+    fs = new_fs()
+    fs.cut_power_after(4)
+    write_safely(fs, "/data/a", b"data")
+    fs.crash()
+    assert fs.read_file("/data/a") == b"data"

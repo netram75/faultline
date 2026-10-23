@@ -1,6 +1,6 @@
 import pytest
 
-from faultline.fs.fake import FakeFileSystem
+from faultline.fs.fake import FakeFileSystem, PowerCut
 from faultline.lsm.manifest import CorruptManifest, Manifest, TableInfo, load, save
 
 ROOT = "/db"
@@ -78,3 +78,24 @@ def test_every_cut_is_caught() -> None:
     for cut in range(len(data)):
         with pytest.raises(CorruptManifest):
             Manifest.decode(data[:cut])
+
+
+def test_power_cut_at_any_step_of_a_save_keeps_old_or_new() -> None:
+    old = Manifest(next_file=2, wal_start=1)
+    new = sample()
+    saw_new = False
+    for n in range(20):
+        fs = new_fs()
+        save(fs, ROOT, old)
+        fs.cut_power_after(n)
+        try:
+            save(fs, ROOT, new)
+        except PowerCut:
+            assert load(fs, ROOT) in (old, new)
+            continue
+        # The save finished before the cut came up
+        fs.crash()
+        assert load(fs, ROOT) == new
+        saw_new = True
+        break
+    assert saw_new
