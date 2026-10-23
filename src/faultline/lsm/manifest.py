@@ -7,8 +7,9 @@ live only if the manifest lists it.
 
 The manifest is small, so we rewrite all of it on every change instead of
 keeping a log of edits like LevelDB does. The new copy goes to MANIFEST.tmp,
-is synced, and is then renamed over MANIFEST. A rename is atomic, so after a
-crash we see the old manifest or the new one, never half of each.
+is synced, and is then renamed over MANIFEST (see fs/atomic.py). A rename is
+atomic, so after a crash we see the old manifest or the new one, never half
+of each.
 
 Format, numbers little endian:
 
@@ -25,10 +26,9 @@ import struct
 import zlib
 from dataclasses import dataclass
 
-from faultline.fs import FileSystem
+from faultline.fs import FileSystem, replace_file
 
 MANIFEST_NAME = "MANIFEST"
-_TEMP_NAME = "MANIFEST.tmp"
 _MAGIC = b"FLTMAN01"
 _HEADER = struct.Struct("<QQI")  # next_file, wal_start, table count
 _TABLE = struct.Struct("<QBQ")  # number, level, size
@@ -83,18 +83,7 @@ class Manifest:
 
 def save(fs: FileSystem, directory: str, manifest: Manifest) -> None:
     """Replace the saved manifest. When this returns, the new one is durable."""
-    temp = os.path.join(directory, _TEMP_NAME)
-    # Left over from a crash in the middle of an earlier save. Safe to drop,
-    # since it never got renamed into place.
-    if fs.exists(temp):
-        fs.remove(temp)
-    f = fs.open_append(temp)
-    f.write(manifest.encode())
-    f.sync()
-    f.close()
-    fs.rename(temp, os.path.join(directory, MANIFEST_NAME))
-    # The rename only survives a crash once the folder is synced
-    fs.sync_dir(directory)
+    replace_file(fs, os.path.join(directory, MANIFEST_NAME), manifest.encode())
 
 
 def load(fs: FileSystem, directory: str) -> Manifest | None:
