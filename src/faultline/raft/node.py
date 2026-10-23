@@ -1,11 +1,12 @@
 """A Raft node, written as a state machine.
 
 The node never reads a clock, opens a socket or starts a thread. Whoever runs
-it drives it with three calls:
+it drives it with a few calls:
 
     node.tick()             one unit of time passed
     node.step(message)      a message arrived from another node
     node.take_messages()    the messages the node wants sent now
+    node.propose(command)   on the leader: add a command to the log
 
 That makes a whole cluster repeatable from one seed: a test (and later the
 fault simulator) decides when time passes and which messages arrive, in
@@ -37,11 +38,13 @@ from faultline.raft.messages import (
     AppendReply,
     AppendRequest,
     Body,
+    Entry,
     Message,
     NodeId,
     VoteReply,
     VoteRequest,
 )
+from faultline.raft.progress import Progress
 
 
 class Role(Enum):
@@ -79,6 +82,9 @@ class Node:
         self.log = log
         self.role = Role.FOLLOWER
         self.leader: NodeId | None = None
+        # Highest log index known to be committed. Not saved: after a restart
+        # the leader tells us again.
+        self.commit_index = 0
         self._fs = fs
         self._directory = directory
         self._others = sorted(set(peers) - {node_id})
@@ -87,6 +93,7 @@ class Node:
         self._state = state
         self._outbox: list[Message] = []
         self._votes: set[NodeId] = set()  # who voted for us, while a candidate
+        self._progress: dict[NodeId, Progress] = {}  # each follower, while leader
         self._election_elapsed = 0
         self._election_timeout = 0
         self._heartbeat_elapsed = 0
@@ -126,7 +133,7 @@ class Node:
             # A leader never times out. It keeps reminding everyone it is there.
             self._heartbeat_elapsed += 1
             if self._heartbeat_elapsed >= self._config.heartbeat_ticks:
-                self._send_heartbeats()
+                self._broadcast_append()
             return
         self._election_elapsed += 1
         if self._election_elapsed >= self._election_timeout:
@@ -156,6 +163,23 @@ class Node:
                 self._on_vote_reply(message.sender, reply)
             case AppendRequest() as request:
                 self._on_append_request(message.sender, request)
+            case AppendReply() as reply:
+                self._on_append_reply(message.sender, reply)
+
+    def propose(self, command: bytes) -> int | None:
+        """Add a command to the log. Returns its index, or None if this node is
+        not the leader (the caller should try the leader instead).
+
+        The command is not committed yet when this returns. It is committed
+        once a majority has it.
+        """
+        if self.role is not Role.LEADER:
+            return None
+        # On our own disk before anyone else hears of it
+        self.log.append([Entry(self.term, command)])
+        for peer in self._others:
+            self._send_append(peer)
+        return self.log.last_index
 
     def take_messages(self) -> list[Message]:
         """Everything the node wants sent since the last call, in order."""
@@ -254,20 +278,38 @@ class Node:
         self.leader = leader
         self._reset_election_timer()
 
+    def _on_append_reply(self, follower: NodeId, reply: AppendReply) -> None:
+        if self.role is not Role.LEADER or not reply.success:
+            return
+        self._progress[follower].on_success(reply.match_index)
+
     def _become_leader(self) -> None:
         self.role = Role.LEADER
         self.leader = self.id
+        self._progress = {
+            peer: Progress(match=0, next=self.log.last_index + 1) for peer in self._others
+        }
         # Tell everyone at once, before another node times out and runs
-        self._send_heartbeats()
+        self._broadcast_append()
 
-    def _send_heartbeats(self) -> None:
-        """An append with no entries. It says "I am the leader for this term",
-        and every follower that gets it resets its election timer."""
+    def _broadcast_append(self) -> None:
+        """Send every follower what it is missing. For a follower that is up
+        to date that is an append with no entries, a heartbeat: it says "I am
+        the leader for this term", and resets the follower's election timer."""
         self._heartbeat_elapsed = 0
         for peer in self._others:
-            self._send(
-                peer, AppendRequest(self.log.last_index, self.log.last_term, (), commit_index=0)
-            )
+            self._send_append(peer)
+
+    def _send_append(self, peer: NodeId) -> None:
+        progress = self._progress[peer]
+        prev_index = progress.next - 1
+        request = AppendRequest(
+            prev_log_index=prev_index,
+            prev_log_term=self.log.term_at(prev_index),
+            entries=self.log.entries_from(progress.next),
+            commit_index=self.commit_index,
+        )
+        self._send(peer, request)
 
     def _become_follower(self, term: int) -> None:
         if term != self.term:
