@@ -20,7 +20,10 @@ What a crash does to things that were not synced:
 * Unsynced bytes at the end of a file can be lost, kept, or kept in part.
   "In part" means a random prefix survives. That is a torn write.
 * A name that was created, renamed or deleted without sync_dir() goes back to
-  how it was at the last sync_dir() of its folder.
+  how it was at the last sync_dir() of its folder. Or, with keep_names=True,
+  every such change sticks, as if the disk wrote the folder out by itself
+  just before the power went. Real disks can do either, and each one hides
+  different bugs, so crash tests should try both.
 
 Things kept simple on purpose, for now:
 
@@ -63,15 +66,23 @@ class FakeFileSystem:
         self.crash_count = 0
         self.steps = 0  # calls so far that could change the disk
         self._steps_left: int | None = None
+        self._keep_names_at_cut = False
         self._rng = random.Random(seed)
         self._dirs = {"/"}
         self._names: dict[str, _Inode] = {}  # what the program sees
         self._durable_names: dict[str, _Inode] = {}  # what survives a crash
 
-    def crash(self) -> None:
-        """Pull the plug. Anything not synced may be lost or torn."""
+    def crash(self, keep_names: bool = False) -> None:
+        """Pull the plug. Anything not synced may be lost or torn.
+
+        keep_names decides what happens to names changed since the last
+        sync_dir(): False puts them back, True keeps them all.
+        """
         self.crash_count += 1
-        self._names = dict(self._durable_names)
+        if keep_names:
+            self._durable_names = dict(self._names)
+        else:
+            self._names = dict(self._durable_names)
 
         # Go through files in sorted order so the same seed always tears the
         # same files the same way. Two names can share one inode after a
@@ -83,15 +94,17 @@ class FakeFileSystem:
                 seen.add(id(inode))
                 inode.crash(self._rng)
 
-    def cut_power_after(self, steps: int) -> None:
+    def cut_power_after(self, steps: int, keep_names: bool = False) -> None:
         """Let `steps` more changes happen, then crash on the next one.
 
         Changes are calls to write, sync, truncate, rename, remove, mkdir,
         sync_dir and open_append. The one that hits the cut raises PowerCut
-        without doing anything, and the disk crashes. After that the disk
-        works normally again, with no cut planned.
+        without doing anything, and the disk crashes (see crash() for
+        keep_names). After that the disk works normally again, with no cut
+        planned.
         """
         self._steps_left = steps
+        self._keep_names_at_cut = keep_names
 
     def open_append(self, path: str) -> "FakeFile":
         self._step()
@@ -174,7 +187,7 @@ class FakeFileSystem:
             self._steps_left -= 1
             return
         self._steps_left = None
-        self.crash()
+        self.crash(self._keep_names_at_cut)
         raise PowerCut(f"power cut at step {self.steps}")
 
     def _inode(self, path: str) -> _Inode:

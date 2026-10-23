@@ -213,3 +213,30 @@ def test_cut_at_every_step_of_a_safe_write() -> None:
     write_safely(fs, "/data/a", b"data")
     fs.crash()
     assert fs.read_file("/data/a") == b"data"
+
+
+def test_keep_names_makes_unsynced_name_changes_stick() -> None:
+    fs = new_fs()
+    write_safely(fs, "/data/old", b"old")
+    f = fs.open_append("/data/new")
+    f.write(b"never synced")
+    f.close()
+    fs.remove("/data/old")
+
+    fs.crash(keep_names=True)
+
+    # The names changed as asked, but the unsynced bytes can still be torn
+    assert fs.list_dir("/data") == ["new"]
+    assert b"never synced".startswith(fs.read_file("/data/new"))
+
+
+def test_power_cut_can_keep_names_too() -> None:
+    fs = new_fs()
+    write_safely(fs, "/data/a", b"data")
+
+    fs.cut_power_after(1, keep_names=True)
+    fs.remove("/data/a")
+    with pytest.raises(PowerCut):
+        fs.sync_dir("/data")
+
+    assert not fs.exists("/data/a")
