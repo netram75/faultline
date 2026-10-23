@@ -246,13 +246,18 @@ class Engine:
     def _write_table(self, number: int) -> TableInfo:
         path = table_path(self._root, number)
         writer = TableWriter(self._fs, path)
-        keys = []
+        # Only the first and last key are needed, for the manifest
+        smallest: bytes | None = None
+        largest = b""
         for key, value in self._memtable:
             # Tombstones go to disk too. An older table may still have the key.
             writer.add(key, value)
-            keys.append(key)
+            if smallest is None:
+                smallest = key
+            largest = key
+        assert smallest is not None, "flush only runs on a memtable with something in it"
         size = writer.finish()
-        return TableInfo(number, 0, keys[0], keys[-1], size)
+        return TableInfo(number, 0, smallest, largest, size)
 
     def _save_manifest(self, state: Manifest) -> None:
         manifest.save(self._fs, self._root, state)
