@@ -17,12 +17,16 @@ from faultline.raft.messages import (
 from faultline.raft.node import Config, Node, Role
 
 PEERS = [1, 2, 3]
-CONFIG = Config(election_ticks=10, heartbeat_ticks=2)
+# Most tests here are about plain elections. Pre-vote has its own tests at the end.
+CONFIG = Config(election_ticks=10, heartbeat_ticks=2, pre_vote=False)
+PRE_VOTE = Config(election_ticks=10, heartbeat_ticks=2, pre_vote=True)
 
 
-def new_node(node_id: int = 1, fs: FakeFileSystem | None = None, seed: int = 0) -> Node:
+def new_node(
+    node_id: int = 1, fs: FakeFileSystem | None = None, seed: int = 0, config: Config = CONFIG
+) -> Node:
     fs = fs or FakeFileSystem()
-    return Node.open(fs, f"/node{node_id}", node_id, PEERS, CONFIG, seed)
+    return Node.open(fs, f"/node{node_id}", node_id, PEERS, config, seed)
 
 
 def tick_until_election(node: Node) -> None:
@@ -367,3 +371,118 @@ def test_leader_steps_down_for_a_bigger_term() -> None:
     assert node.role is Role.FOLLOWER
     assert node.term == 7
     assert node.leader == 3
+
+
+def test_pre_vote_first_and_the_term_stays() -> None:
+    fs = FakeFileSystem()
+    node = new_node(fs=fs, config=PRE_VOTE)
+
+    tick_until_election(node)
+
+    assert node.role is Role.PRE_CANDIDATE
+    assert node.term == 0
+    assert node.voted_for is None
+    assert hard_state.load(fs, "/node1") == HardState(0, None)
+    request = VoteRequest(0, 0, pre_vote=True)
+    assert node.take_messages() == [Message(1, 2, 1, request), Message(1, 3, 1, request)]
+
+
+def test_majority_of_pre_votes_starts_the_real_election() -> None:
+    node = new_node(config=PRE_VOTE)
+    tick_until_election(node)
+    node.take_messages()
+
+    node.step(Message(2, 1, 1, VoteReply(granted=True, pre_vote=True)))
+
+    assert node.role is Role.CANDIDATE
+    assert node.term == 1
+    assert node.voted_for == 1
+    assert node.take_messages() == [
+        Message(1, 2, 1, VoteRequest(0, 0)),
+        Message(1, 3, 1, VoteRequest(0, 0)),
+    ]
+
+
+def test_cut_off_node_keeps_its_term() -> None:
+    node = new_node(config=PRE_VOTE)
+
+    for _ in range(50 * PRE_VOTE.election_ticks):
+        node.tick()
+
+    assert node.role is Role.PRE_CANDIDATE
+    assert node.term == 0
+
+
+def test_pre_vote_request_changes_nothing_on_the_voter() -> None:
+    fs = FakeFileSystem()
+    node = new_node(fs=fs, config=PRE_VOTE)
+
+    node.step(Message(2, 1, 1, VoteRequest(0, 0, pre_vote=True)))
+
+    assert node.take_messages() == [Message(1, 2, 1, VoteReply(granted=True, pre_vote=True))]
+    assert node.term == 0
+    assert node.voted_for is None
+    assert not fs.exists("/node1/RAFT_STATE")
+
+
+def test_no_pre_vote_while_the_leader_is_alive() -> None:
+    node = new_node(config=PRE_VOTE)
+    node.step(Message(2, 1, 1, AppendRequest(0, 0, (), 0)))
+
+    node.step(Message(3, 1, 2, VoteRequest(0, 0, pre_vote=True)))
+
+    assert node.take_messages() == [Message(1, 3, 1, VoteReply(granted=False, pre_vote=True))]
+
+
+def test_pre_vote_once_the_leader_has_gone_quiet() -> None:
+    node = new_node(config=PRE_VOTE)
+    node.step(Message(2, 1, 1, AppendRequest(0, 0, (), 0)))
+    for _ in range(PRE_VOTE.election_ticks):
+        node.tick()
+    node.take_messages()
+
+    node.step(Message(3, 1, 2, VoteRequest(0, 0, pre_vote=True)))
+
+    assert Message(1, 3, 2, VoteReply(granted=True, pre_vote=True)) in node.take_messages()
+
+
+def test_no_pre_vote_for_a_log_that_is_behind() -> None:
+    node = new_node(config=PRE_VOTE)
+    give_log(node, 1, 1)
+
+    node.step(Message(2, 1, 1, VoteRequest(1, 1, pre_vote=True)))
+
+    assert node.take_messages() == [Message(1, 2, 0, VoteReply(granted=False, pre_vote=True))]
+
+
+def test_refused_pre_vote_with_a_bigger_term_catches_us_up() -> None:
+    node = new_node(config=PRE_VOTE)
+    tick_until_election(node)
+
+    node.step(Message(2, 1, 6, VoteReply(granted=False, pre_vote=True)))
+
+    assert node.role is Role.FOLLOWER
+    assert node.term == 6
+
+
+def test_leader_refuses_pre_votes() -> None:
+    node = new_node(config=PRE_VOTE)
+    tick_until_election(node)
+    node.step(Message(2, 1, 1, VoteReply(granted=True, pre_vote=True)))
+    node.step(Message(2, 1, 1, VoteReply(granted=True)))
+    assert node.role is Role.LEADER
+    node.take_messages()
+
+    node.step(Message(3, 1, 2, VoteRequest(0, 0, pre_vote=True)))
+
+    assert node.take_messages() == [Message(1, 3, 1, VoteReply(granted=False, pre_vote=True))]
+    assert node.role is Role.LEADER
+
+
+def test_cluster_of_one_with_pre_vote() -> None:
+    node = Node.open(FakeFileSystem(), "/solo", 1, [1], PRE_VOTE)
+
+    tick_until_election(node)
+
+    assert node.role is Role.LEADER
+    assert node.term == 1
