@@ -16,7 +16,7 @@ never see them.
 """
 
 import heapq
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 
 from faultline.entry import Tombstone, Value
 
@@ -27,7 +27,7 @@ type _HeapItem = tuple[bytes, int, Value, _Source]
 
 
 def merge(
-    sources: list[Iterable[tuple[bytes, Value]]],
+    sources: Sequence[Iterable[tuple[bytes, Value]]],
     drop_tombstones: bool = False,
 ) -> Iterator[tuple[bytes, Value]]:
     """Merge sorted sources, newest first, into one sorted stream with one

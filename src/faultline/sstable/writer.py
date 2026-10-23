@@ -46,6 +46,12 @@ class TableWriter:
         self._keys: list[bytes] = []
         self._offset = 0
 
+    @property
+    def size(self) -> int:
+        """Bytes written to the file so far. The block being filled only
+        counts once it is full and written out."""
+        return self._offset
+
     def add(self, key: bytes, value: Value) -> None:
         if self._keys and key <= self._keys[-1]:
             raise ValueError(f"keys must go up: {key!r} came after {self._keys[-1]!r}")

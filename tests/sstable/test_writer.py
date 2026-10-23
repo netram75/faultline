@@ -50,6 +50,21 @@ def test_big_input_is_split_into_many_blocks() -> None:
         assert block[-1][0] == last_key
 
 
+def test_size_counts_full_blocks_as_they_are_written() -> None:
+    fs = new_fs()
+    writer = TableWriter(fs, PATH, block_size=256)
+    assert writer.size == 0
+
+    sizes = []
+    for i in range(100):
+        writer.add(f"key{i:05d}".encode(), b"v" * 20)
+        sizes.append(writer.size)
+
+    assert sizes == sorted(sizes)
+    assert sizes[-1] == len(fs.read_file(PATH)) > 0
+    assert writer.finish() > sizes[-1]
+
+
 def test_keys_out_of_order_are_refused() -> None:
     writer = TableWriter(new_fs(), PATH)
     writer.add(b"b", b"1")
