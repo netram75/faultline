@@ -428,6 +428,7 @@ def test_pre_vote_request_changes_nothing_on_the_voter() -> None:
 def test_no_pre_vote_while_the_leader_is_alive() -> None:
     node = new_node(config=PRE_VOTE)
     node.step(Message(2, 1, 1, AppendRequest(0, 0, (), 0)))
+    node.take_messages()
 
     node.step(Message(3, 1, 2, VoteRequest(0, 0, pre_vote=True)))
 

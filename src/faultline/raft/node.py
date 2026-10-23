@@ -278,6 +278,36 @@ class Node:
         self.leader = leader
         self._reset_election_timer()
 
+        # Raft paper, figure 2 (AppendEntries): our log must have the entry
+        # just before the new ones, with the same term. If it does, the log
+        # matching property (section 5.3) says everything before it matches
+        # too, and the new entries can go right after it.
+        if not self.log.matches(request.prev_log_index, request.prev_log_term):
+            self._send(leader, AppendReply(success=False, match_index=0))
+            return
+        self._append_new_entries(request.prev_log_index, request.entries)
+        # log.append() synced the entries, so this promise holds after a crash
+        last_new = request.prev_log_index + len(request.entries)
+        self._send(leader, AppendReply(success=True, match_index=last_new))
+
+    def _append_new_entries(self, prev_index: int, entries: tuple[Entry, ...]) -> None:
+        """Raft paper, figure 2 (AppendEntries steps 3 and 4). Skip entries we
+        already have. At the first one that conflicts (same index, different
+        term), cut our log there and take the leader's entries from that point.
+
+        Never cut when nothing conflicts. A late or repeated message can carry
+        fewer entries than a newer one already gave us, and cutting would throw
+        away entries we already told the leader we have.
+        """
+        for offset, entry in enumerate(entries):
+            index = prev_index + 1 + offset
+            if index <= self.log.last_index and self.log.term_at(index) == entry.term:
+                continue
+            if index <= self.log.last_index:
+                self.log.truncate_from(index)
+            self.log.append(entries[offset:])
+            return
+
     def _on_append_reply(self, follower: NodeId, reply: AppendReply) -> None:
         if self.role is not Role.LEADER or not reply.success:
             return
