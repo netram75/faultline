@@ -304,3 +304,11 @@ def test_level_1_tables_never_overlap() -> None:
         key = rng.randbytes(2)
         assert engine.get(key) == model.get(key)
     assert engine.scan() == sorted(model.items())
+
+
+def test_package_exports() -> None:
+    from faultline import lsm
+
+    engine = lsm.Engine.open(FakeFileSystem(), ROOT, lsm.Options())
+    engine.write(lsm.WriteBatch().put(b"k", b"v"))
+    assert engine.get(b"k") == b"v"
