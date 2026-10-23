@@ -110,7 +110,8 @@ class Node:
             fs.mkdir(directory)
             fs.sync_dir(os.path.dirname(os.path.normpath(directory)) or ".")
         state = hard_state.load(fs, directory)
-        return cls(fs, directory, node_id, peers, config or Config(), seed, state, RaftLog())
+        log = RaftLog.open(fs, os.path.join(directory, "log"))
+        return cls(fs, directory, node_id, peers, config or Config(), seed, state, log)
 
     @property
     def term(self) -> int:

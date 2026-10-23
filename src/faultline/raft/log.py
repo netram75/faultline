@@ -13,17 +13,51 @@ Two facts about logs carry Raft's safety (Raft paper, section 5.3):
 So to check that a follower's log matches the leader's up to some point, it
 is enough to compare one (index, term) pair. That is what matches() does.
 
-For now the log lives in memory. Day 5 saves it to disk.
+On disk the log is a WAL (see wal/) of two kinds of records:
+
+    APPEND    kind u8 = 1, index u64, term u64, the command
+    TRUNCATE  kind u8 = 2, from_index u64
+
+Opening the log replays them in order. Cutting entries off the end, which a
+follower does when its log disagrees with the leader's, is just one more
+record, so the file is only ever appended to. It never shrinks yet: that
+needs snapshots, which come later.
 """
 
+import struct
 from collections.abc import Sequence
+from typing import Self
 
+from faultline.fs import FileSystem
 from faultline.raft.messages import Entry
+from faultline.wal import WalWriter, open_wal
+
+_APPEND = 1
+_TRUNCATE = 2
+_APPEND_HEADER = struct.Struct("<BQQ")  # kind, index, term
+_TRUNCATE_RECORD = struct.Struct("<BQ")  # kind, from_index
+
+
+class CorruptLog(Exception):
+    """A log record that can't be right: unknown, or out of order."""
 
 
 class RaftLog:
-    def __init__(self) -> None:
+    """The log. RaftLog() keeps it in memory only, which tests use.
+    RaftLog.open() keeps it on disk, and append() and truncate_from() return
+    only once the change is synced."""
+
+    def __init__(self, wal: WalWriter | None = None) -> None:
         self._entries: list[Entry] = []
+        self._wal = wal
+
+    @classmethod
+    def open(cls, fs: FileSystem, directory: str) -> Self:
+        records, wal = open_wal(fs, directory)
+        log = cls(wal)
+        for record in records:
+            log._replay(record)
+        return log
 
     @property
     def last_index(self) -> int:
@@ -64,10 +98,37 @@ class RaftLog:
         return last_index >= self.last_index
 
     def append(self, entries: Sequence[Entry]) -> None:
+        """Add entries to the end. On disk, one sync covers all of them."""
+        if self._wal is not None and entries:
+            for i, entry in enumerate(entries, start=self.last_index + 1):
+                self._wal.append(_APPEND_HEADER.pack(_APPEND, i, entry.term) + entry.command)
+            self._wal.sync()
         self._entries += entries
 
     def truncate_from(self, index: int) -> None:
         """Drop the entry at `index` and everything after it."""
         if not 1 <= index <= self.last_index + 1:
             raise IndexError(f"no entry {index}, the log ends at {self.last_index}")
+        if self._wal is not None and index <= self.last_index:
+            self._wal.append(_TRUNCATE_RECORD.pack(_TRUNCATE, index))
+            self._wal.sync()
         del self._entries[index - 1 :]
+
+    def close(self) -> None:
+        if self._wal is not None:
+            self._wal.close()
+
+    def _replay(self, record: bytes) -> None:
+        kind = record[0] if record else None
+        if kind == _APPEND and len(record) >= _APPEND_HEADER.size:
+            _, index, term = _APPEND_HEADER.unpack_from(record)
+            if index != self.last_index + 1:
+                raise CorruptLog(f"entry {index} comes after entry {self.last_index}")
+            self._entries.append(Entry(term, record[_APPEND_HEADER.size :]))
+        elif kind == _TRUNCATE and len(record) == _TRUNCATE_RECORD.size:
+            _, index = _TRUNCATE_RECORD.unpack(record)
+            if not 1 <= index <= self.last_index:
+                raise CorruptLog(f"cut at entry {index}, but the log ends at {self.last_index}")
+            del self._entries[index - 1 :]
+        else:
+            raise CorruptLog(f"bad log record of {len(record)} bytes")

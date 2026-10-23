@@ -486,3 +486,13 @@ def test_cluster_of_one_with_pre_vote() -> None:
 
     assert node.role is Role.LEADER
     assert node.term == 1
+
+
+def test_log_survives_a_restart() -> None:
+    fs = FakeFileSystem()
+    node = new_node(fs=fs)
+    node.log.append([Entry(1, b"set x 1")])
+
+    fs.crash()
+
+    assert new_node(fs=fs).log.entries_from(1) == (Entry(1, b"set x 1"),)
