@@ -18,7 +18,9 @@ from faultline.raft.node import Config, Node, Role
 
 PEERS = [1, 2, 3]
 # Most tests here are about plain elections. Pre-vote has its own tests at the end.
-CONFIG = Config(election_ticks=10, heartbeat_ticks=2, pre_vote=False)
+# Pre-vote and check quorum have their own tests. Here they would only get in
+# the way of the rule each test is about.
+CONFIG = Config(election_ticks=10, heartbeat_ticks=2, pre_vote=False, check_quorum=False)
 PRE_VOTE = Config(election_ticks=10, heartbeat_ticks=2, pre_vote=True)
 
 

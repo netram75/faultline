@@ -70,6 +70,9 @@ class Config:
     pre_vote: bool = True
     # Most entries in one append. A follower far behind gets several.
     max_entries_per_message: int = 64
+    # A leader that has not heard from a majority for election_ticks steps
+    # down (Raft thesis, section 6.2)
+    check_quorum: bool = True
 
 
 class Node:
@@ -106,6 +109,9 @@ class Node:
         self._election_elapsed = 0
         self._election_timeout = 0
         self._heartbeat_elapsed = 0
+        # While leader: who answered us since the last quorum check
+        self._heard_from: set[NodeId] = set()
+        self._quorum_elapsed = 0
         self._reset_election_timer()
 
     @classmethod
@@ -139,6 +145,8 @@ class Node:
 
     def tick(self) -> None:
         if self.role is Role.LEADER:
+            if self._lost_quorum():
+                return
             # A leader never times out. It keeps reminding everyone it is there.
             self._heartbeat_elapsed += 1
             if self._heartbeat_elapsed >= self._config.heartbeat_ticks:
@@ -364,6 +372,9 @@ class Node:
     def _on_append_reply(self, follower: NodeId, reply: AppendReply) -> None:
         if self.role is not Role.LEADER:
             return
+        # Any answer in our term, yes or no, means this follower still sees
+        # us as its leader
+        self._heard_from.add(follower)
         progress = self._progress[follower]
         if reply.success:
             progress.on_success(reply.match_index)
@@ -397,6 +408,8 @@ class Node:
     def _become_leader(self) -> None:
         self.role = Role.LEADER
         self.leader = self.id
+        self._heard_from = set()
+        self._quorum_elapsed = 0
         self._progress = {
             peer: Progress(match=0, next=self.log.last_index + 1) for peer in self._others
         }
@@ -430,6 +443,30 @@ class Node:
         )
         self._send(peer, request)
         progress.sent(len(entries))
+
+    def _lost_quorum(self) -> bool:
+        """Raft thesis, section 6.2 (check quorum). Once every election_ticks,
+        a leader checks that a majority answered it since the last check. If
+        not, it steps down to follower in the same term.
+
+        A leader cut off from the rest can't commit anything, but without
+        this it would go on thinking it is the leader, and keep clients
+        talking to it, for as long as the network is split. The other side
+        has elected a new leader by now anyway: it got no heartbeats for
+        longer than this. Safe reads (ReadIndex) don't depend on it, but it
+        sends clients to the real leader much sooner.
+        """
+        if not self._config.check_quorum:
+            return False
+        self._quorum_elapsed += 1
+        if self._quorum_elapsed < self._config.election_ticks:
+            return False
+        self._quorum_elapsed = 0
+        if self._is_majority(self._heard_from | {self.id}):
+            self._heard_from = set()
+            return False
+        self._become_follower(self.term)
+        return True
 
     def _become_follower(self, term: int) -> None:
         if term != self.term:
