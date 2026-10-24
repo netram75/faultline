@@ -96,3 +96,29 @@ def _candidates(ops: Sequence[Op], placed: int, first: int) -> Iterator[int]:
             break  # sorted by start, so the rest started later still
         if not placed >> i & 1:
             yield i
+
+
+def final_states(ops: Sequence[Op], budget: int | None = None) -> set[State]:
+    """Every value the key can hold after the ops, over all orders that
+    work. Empty if no order works. This one explores everything instead of
+    stopping at the first order, so it is slower. It is only used to
+    explain a failure."""
+    must = sum(1 << i for i, op in enumerate(ops) if op.end is not None)
+    found: set[State] = set()
+    seen: set[tuple[int, State]] = {(0, None)}
+    todo: list[tuple[int, State]] = [(0, None)]
+    steps = 0
+    while todo:
+        placed, state = todo.pop()
+        if placed & must == must:
+            # Ops with no answer may still go after this, so carry on too
+            found.add(state)
+        for i in _candidates(ops, placed, 0):
+            steps += 1
+            if budget is not None and steps > budget:
+                raise OutOfBudget(f"no answer after {budget} steps")
+            possible, after = step(state, ops[i])
+            if possible and (placed | 1 << i, after) not in seen:
+                seen.add((placed | 1 << i, after))
+                todo.append((placed | 1 << i, after))
+    return found

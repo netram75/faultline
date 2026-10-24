@@ -57,4 +57,16 @@ def register_history(rng: random.Random, count: int, values: int = 3) -> list[Op
             ops.append(cas(expected, value, matched, start, end))
             if matched:
                 state = value
-    return numbered(*ops)
+    return numbered(*_spread(ops))
+
+
+def _spread(ops: list[Op]) -> list[Op]:
+    """Give every start and every end its own position, like in a real
+    history. Ties are broken by op, and no start moves past an end, so the
+    checker sees the same history."""
+    marks = sorted(
+        [(op.start, i, "start") for i, op in enumerate(ops)]
+        + [(op.end, i, "end") for i, op in enumerate(ops) if op.end is not None]
+    )
+    new = {(i, which): position for position, (_, i, which) in enumerate(marks)}
+    return [replace(op, start=new[i, "start"], end=new[i, "end"]) for i, op in enumerate(ops)]
