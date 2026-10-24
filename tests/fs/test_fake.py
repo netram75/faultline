@@ -240,3 +240,14 @@ def test_power_cut_can_keep_names_too() -> None:
         fs.sync_dir("/data")
 
     assert not fs.exists("/data/a")
+
+
+def test_planned_power_cut_can_be_cancelled() -> None:
+    fs = FakeFileSystem()
+    fs.cut_power_after(0)
+    fs.cancel_power_cut()
+
+    fs.mkdir("/a")
+
+    assert fs.exists("/a")
+    assert fs.crash_count == 0

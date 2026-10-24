@@ -106,6 +106,10 @@ class FakeFileSystem:
         self._steps_left = steps
         self._keep_names_at_cut = keep_names
 
+    def cancel_power_cut(self) -> None:
+        """Forget a cut planned with cut_power_after() that has not happened yet."""
+        self._steps_left = None
+
     def open_append(self, path: str) -> "FakeFile":
         self._step()
         path = _clean(path)
