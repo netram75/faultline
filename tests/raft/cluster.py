@@ -111,9 +111,13 @@ class Cluster:
         logs = [self.nodes[i].log for i in self.ids if i not in self.down]
         for a in logs:
             for b in logs:
-                for index in range(min(a.last_index, b.last_index), 0, -1):
+                # Entries in a snapshot can't be compared any more. They are
+                # committed, and committed entries are checked as they apply.
+                start = max(a.base_index, b.base_index)
+                for index in range(min(a.last_index, b.last_index), start, -1):
                     if a.term_at(index) == b.term_at(index):
-                        assert a.entries_from(1, index) == b.entries_from(1, index)
+                        count = index - start
+                        assert a.entries_from(start + 1, count) == b.entries_from(start + 1, count)
                         break
 
     def leader(self) -> NodeId | None:
@@ -183,6 +187,8 @@ class Cluster:
                 assert len(leaders) == 1, f"two leaders in term {node.term}: {sorted(leaders)}"
                 # A new leader. It must have everything committed so far.
                 for index, entry in self.committed.items():
+                    if index <= node.log.base_index:
+                        continue  # in its snapshot
                     assert index <= node.log.last_index and node.log.entry(index) == entry, (
                         f"leader {i} of term {node.term} is missing committed entry {index}"
                     )

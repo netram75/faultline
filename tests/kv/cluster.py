@@ -28,8 +28,10 @@ class KVCluster:
         config: Config | None = None,
         drop_rate: float = 0.0,
         repeat_rate: float = 0.0,
+        snapshot_every: int = 1000,
     ) -> None:
         self.rng = random.Random(seed)
+        self.snapshot_every = snapshot_every
         self.ids = list(range(1, size + 1))
         self.config = config or Config()
         self.drop_rate = drop_rate
@@ -107,7 +109,9 @@ class KVCluster:
 
     def _open(self, i: NodeId) -> KVNode:
         seed = self.rng.randrange(2**32)
-        return KVNode.open(self.disks[i], f"/node{i}", i, self.ids, self.config, seed, SMALL)
+        return KVNode.open(
+            self.disks[i], f"/node{i}", i, self.ids, self.config, seed, SMALL, self.snapshot_every
+        )
 
     def can_talk(self, a: NodeId, b: NodeId) -> bool:
         if a in self.down or b in self.down:

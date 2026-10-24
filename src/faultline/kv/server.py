@@ -22,6 +22,11 @@ After a restart Raft hands out committed entries from the start of its log
 again. The machine already applied some of them before the crash, and knows
 which (its applied index is saved with the data), so those are skipped.
 
+Snapshots: once `snapshot_every` entries were applied since the log's base,
+the machine's data goes to Raft as a snapshot and Raft drops the log up to
+there (see raft/snapshot.py). That is what keeps the log from growing
+forever.
+
 Folders: <directory>/raft for Raft's term, vote and log, and
 <directory>/data for the storage engine.
 """
@@ -38,10 +43,11 @@ from faultline.raft.node import Config, Node
 
 
 class KVNode:
-    def __init__(self, raft: Node, machine: StateMachine) -> None:
+    def __init__(self, raft: Node, machine: StateMachine, snapshot_every: int = 1000) -> None:
         # Use KVNode.open()
         self.raft = raft
         self.machine = machine
+        self._snapshot_every = snapshot_every
         self._waiting: dict[int, Command] = {}  # log index -> command submitted here
         self._results: list[tuple[Command, Result]] = []
         self._read_keys: dict[int, bytes] = {}  # ctx -> key, reads not answered yet
@@ -58,13 +64,14 @@ class KVNode:
         config: Config | None = None,
         seed: int = 0,
         options: Options | None = None,
+        snapshot_every: int = 1000,
     ) -> Self:
         if not fs.exists(directory):
             fs.mkdir(directory)
             fs.sync_dir(os.path.dirname(os.path.normpath(directory)) or ".")
         raft = Node.open(fs, os.path.join(directory, "raft"), node_id, peers, config, seed)
         machine = StateMachine.open(fs, os.path.join(directory, "data"), options)
-        node = cls(raft, machine)
+        node = cls(raft, machine, snapshot_every)
         node._drain()
         return node
 
@@ -119,6 +126,7 @@ class KVNode:
         """Do everything Raft's last step made possible."""
         self._apply_committed()
         self._answer_reads()
+        self._maybe_snapshot()
 
     def _apply_committed(self) -> None:
         for index, entry in self.raft.take_committed():
@@ -132,6 +140,15 @@ class KVNode:
             # of leader. Only answer for our own.
             if entry.command == encode(command) and result is not None:
                 self._results.append((command, result))
+
+    def _maybe_snapshot(self) -> None:
+        applied = self.machine.applied_index
+        # Only once Raft has caught up with the machine after a restart, so
+        # the snapshot and Raft agree on what index it is at
+        if applied != self.raft.last_applied:
+            return
+        if applied - self.raft.log.base_index >= self._snapshot_every:
+            self.raft.compact(applied, self.machine.snapshot())
 
     def _answer_reads(self) -> None:
         self._confirmed += self.raft.take_reads()

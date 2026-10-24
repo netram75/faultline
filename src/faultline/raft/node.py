@@ -10,6 +10,7 @@ it drives it with a few calls:
     node.take_committed()   committed commands, in order, to apply
     node.read_index(ctx)    on the leader: start a safe read (see read_index.py)
     node.take_reads()       reads that are safe to answer, with their read index
+    node.compact(i, data)   the state machine saved a snapshot up to index i
 
 That makes a whole cluster repeatable from one seed: a test (and later the
 fault simulator) decides when time passes and which messages arrive, in
@@ -34,7 +35,7 @@ from enum import Enum
 from typing import Self
 
 from faultline.fs import FileSystem
-from faultline.raft import hard_state
+from faultline.raft import hard_state, snapshot
 from faultline.raft.hard_state import HardState
 from faultline.raft.log import RaftLog
 from faultline.raft.messages import (
@@ -49,6 +50,7 @@ from faultline.raft.messages import (
 )
 from faultline.raft.progress import Progress
 from faultline.raft.read_index import ReadTracker
+from faultline.raft.snapshot import Snapshot
 
 # The command of the entry every new leader adds first (see _become_leader).
 # Callers skip it when they apply entries.
@@ -89,17 +91,21 @@ class Node:
         seed: int,
         state: HardState,
         log: RaftLog,
+        saved: Snapshot | None = None,
     ) -> None:
         # Use Node.open(), which loads the saved state and then calls this
         self.id = node_id
         self.log = log
+        # The newest snapshot, if any. Everything up to its index is applied.
+        self.snapshot = saved
         self.role = Role.FOLLOWER
         self.leader: NodeId | None = None
         # Highest log index known to be committed. Not saved: after a restart
-        # the leader tells us again.
-        self.commit_index = 0
+        # the leader tells us again. Entries up to the log's base are in a
+        # snapshot, so they are committed and applied.
+        self.commit_index = log.base_index
         # Last index handed out by take_committed()
-        self.last_applied = 0
+        self.last_applied = log.base_index
         self._fs = fs
         self._directory = directory
         self._others = sorted(set(peers) - {node_id})
@@ -137,7 +143,8 @@ class Node:
             fs.sync_dir(os.path.dirname(os.path.normpath(directory)) or ".")
         state = hard_state.load(fs, directory)
         log = RaftLog.open(fs, os.path.join(directory, "log"))
-        return cls(fs, directory, node_id, peers, config or Config(), seed, state, log)
+        saved = snapshot.load(fs, directory)
+        return cls(fs, directory, node_id, peers, config or Config(), seed, state, log, saved)
 
     @property
     def term(self) -> int:
@@ -248,6 +255,19 @@ class Node:
         """Reads confirmed since the last call, as (ctx, read_index)."""
         return self._reads.take_ready()
 
+    def compact(self, index: int, data: bytes) -> None:
+        """The state machine has everything up to `index` in `data`. Keep that
+        as our snapshot and drop the log up to there (Raft paper, section 7)."""
+        if index <= self.log.base_index:
+            return
+        if index > self.last_applied:
+            raise ValueError(f"snapshot at {index}, but only {self.last_applied} was applied")
+        saved = Snapshot(index, self.log.term_at(index), data)
+        # Snapshot first, then drop the entries. See snapshot.py.
+        snapshot.save(self._fs, self._directory, saved)
+        self.snapshot = saved
+        self.log.compact(index, saved.term)
+
     def take_messages(self) -> list[Message]:
         """Everything the node wants sent since the last call, in order."""
         messages, self._outbox = self._outbox, []
@@ -344,6 +364,7 @@ class Node:
         self.role = Role.FOLLOWER
         self.leader = leader
         self._reset_election_timer()
+        request = self._skip_compacted(request)
 
         # Raft paper, figure 2 (AppendEntries): our log must have the entry
         # just before the new ones, with the same term. If it does, the log
@@ -364,6 +385,25 @@ class Node:
         # log.append() synced the entries, so this promise holds after a crash
         self._send(leader, AppendReply(success=True, match_index=last_new, round=request.round))
 
+    def _skip_compacted(self, request: AppendRequest) -> AppendRequest:
+        """Drop the entries of `request` that are already in our snapshot.
+
+        We can't check them against our log any more, but we don't need to:
+        they are committed, and a committed entry is the same on every node.
+        So the request becomes one that starts right after our base.
+        """
+        base = self.log.base_index
+        if request.prev_log_index >= base:
+            return request
+        skip = base - request.prev_log_index
+        return AppendRequest(
+            prev_log_index=base,
+            prev_log_term=self.log.base_term,
+            entries=request.entries[skip:],
+            commit_index=request.commit_index,
+            round=request.round,
+        )
+
     def _mismatch_hint(self, prev_index: int) -> int:
         """Where the leader should try next, after our log failed its check at
         `prev_index`. Always before prev_index, so every failed try moves the
@@ -377,7 +417,7 @@ class Node:
             return self.log.last_index
         suspect_term = self.log.term_at(prev_index)
         index = prev_index
-        while index > 1 and self.log.term_at(index - 1) == suspect_term:
+        while index > self.log.base_index + 1 and self.log.term_at(index - 1) == suspect_term:
             index -= 1
         return index - 1
 
@@ -466,6 +506,10 @@ class Node:
 
     def _send_append(self, peer: NodeId) -> None:
         progress = self._progress[peer]
+        if progress.next <= self.log.base_index:
+            # The entries it needs were compacted away. Only the snapshot can
+            # bring it up to date, and sending one comes in the next step.
+            return
         prev_index = progress.next - 1
         entries = self.log.entries_from(progress.next, self._config.max_entries_per_message)
         request = AppendRequest(

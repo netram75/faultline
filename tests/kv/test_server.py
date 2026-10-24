@@ -88,3 +88,28 @@ def test_restart_does_not_apply_anything_twice() -> None:
 
     cluster.check_same_data([b"k0", b"k1", b"k2", b"k3"])
     assert cluster.nodes[1].machine.get(b"k2") == b"v30"
+
+
+def test_logs_stay_short_with_snapshots() -> None:
+    cluster = KVCluster(3, seed=6, snapshot_every=10)
+    leader = cluster.wait_for_leader()
+    for seq in range(1, 61):
+        cluster.submit(leader, Command(1, seq, Put(b"k%d" % (seq % 5), b"v%d" % seq)))
+        cluster.tick()
+    cluster.tick(5)
+
+    for node in cluster.nodes.values():
+        assert node.raft.snapshot is not None
+        assert node.raft.log.base_index >= 50
+        assert node.raft.log.last_index - node.raft.log.base_index <= 15
+    cluster.check_same_data([b"k%d" % i for i in range(5)])
+
+    for i in cluster.ids:
+        cluster.crash(i)
+    for i in cluster.ids:
+        cluster.restart(i)
+    cluster.wait_for_leader()
+    cluster.tick(5)
+
+    cluster.check_same_data([b"k%d" % i for i in range(5)])
+    assert cluster.nodes[2].machine.get(b"k0") == b"v60"

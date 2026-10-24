@@ -45,6 +45,7 @@ SESSION = b"s"
 APPLIED_KEY = b"m/applied"
 
 _SESSION = struct.Struct(">QBB")  # seq, ok, has_value, then the value
+_LENGTH = struct.Struct("<I")
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,19 @@ class StateMachine:
         self._engine.write(batch)
         self.applied_index = index
         return result
+
+    def snapshot(self) -> bytes:
+        """Everything in the engine, sessions and applied index included, as
+        bytes Raft can keep (see raft/snapshot.py). Format: for each key in
+        order, key length u32, key, value length u32, value.
+
+        It holds all the data in memory at once. Fine at the sizes this
+        project runs at; a real database streams it in chunks.
+        """
+        parts = []
+        for key, value in self._engine.scan():
+            parts += [_LENGTH.pack(len(key)), key, _LENGTH.pack(len(value)), value]
+        return b"".join(parts)
 
     def close(self) -> None:
         self._engine.close()

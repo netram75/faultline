@@ -167,3 +167,16 @@ def test_session_is_saved_with_the_change() -> None:
         assert sm.get(b"k") == b"a"
         steps += 1
     assert steps > 0
+
+
+def test_snapshot_is_the_same_for_the_same_data() -> None:
+    a = StateMachine.open(FakeFileSystem(seed=1), DIR, SMALL)
+    b = StateMachine.open(FakeFileSystem(seed=2), DIR, SMALL)
+    for i in range(1, 41):
+        command = cmd(Put(b"k%d" % (i % 9), b"v%d" % i), seq=i)
+        a.apply(i, command)
+        b.apply(i, command)
+
+    # Different disks, different flush timing, same data: same snapshot
+    assert a.snapshot() == b.snapshot()
+    assert b"k3" in a.snapshot()
