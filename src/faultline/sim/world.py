@@ -6,6 +6,7 @@ World only wires the parts together:
     client -> node                 requests: submit a write, start a read
     node -> client                 answers, routed by client id or read ctx
     client -> history              every operation's start and end (history.py)
+    node -> checker                after every step, Raft's safety rules (checks.py)
 
 Requests and answers between clients and nodes take a few milliseconds
 too. An answer can be lost on the way, at the network's drop rate, which is
@@ -19,6 +20,7 @@ from faultline.kv.commands import Command
 from faultline.kv.state_machine import Result
 from faultline.raft.messages import Message, NodeId
 from faultline.raft.node import Config, Role
+from faultline.sim.checks import SafetyChecker
 from faultline.sim.client import CTX_SHIFT, ClientTimeouts, SimClient
 from faultline.sim.history import History
 from faultline.sim.loop import EventLoop
@@ -55,9 +57,11 @@ class World:
             client.on_start = self.history.invoke
             client.on_done = self.history.complete
         self._rng = random.Random(self.loop.seed_for("answers"))
+        self.checker = SafetyChecker(self.loop, self.nodes)
         for node in self.nodes.values():
             node.on_result = self._send_result
             node.on_read = self._send_read
+            node.after_step = self.checker.check
 
     def start(self) -> None:
         for node in self.nodes.values():
@@ -87,15 +91,15 @@ class World:
         return self.nodes[node].read(key, ctx)
 
     def _send_result(self, command: Command, result: Result) -> None:
-        if self._answer_lost():
-            return
-        client = self.clients[command.client]
+        client = self.clients.get(command.client)
+        if client is None or self._answer_lost():
+            return  # lost, or a request made by hand (in a test)
         self.loop.after(self._rng.randint(1, 5), partial(client.answer, command, result))
 
     def _send_read(self, ctx: int, value: bytes | None) -> None:
-        if self._answer_lost():
+        client = self.clients.get(ctx >> CTX_SHIFT)
+        if client is None or self._answer_lost():
             return
-        client = self.clients[ctx >> CTX_SHIFT]
         self.loop.after(self._rng.randint(1, 5), partial(client.answer_read, ctx, value))
 
     def _answer_lost(self) -> bool:

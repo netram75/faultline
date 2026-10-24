@@ -57,6 +57,8 @@ class SimNode:
         # Where answers go. The simulation sets these.
         self.on_result: Callable[[Command, Result], None] = lambda command, result: None
         self.on_read: Callable[[int, bytes | None], None] = lambda ctx, value: None
+        # Called after every step the node takes, for the safety checks
+        self.after_step: Callable[[NodeId], None] = lambda node_id: None
         self._loop = loop
         self._send = send
         self._peers = peers
@@ -158,3 +160,4 @@ class SimNode:
             self.on_result(command, result)
         for ctx, value in self.kv.take_read_results():
             self.on_read(ctx, value)
+        self.after_step(self.id)
