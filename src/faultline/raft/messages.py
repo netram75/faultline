@@ -16,8 +16,9 @@ Wire format, numbers little endian:
     VoteRequest:   last_log_index u64, last_log_term u64, pre_vote u8
     VoteReply:     granted u8, pre_vote u8
     AppendRequest: prev_log_index u64, prev_log_term u64, commit_index u64,
-                   entry count u32, then per entry: term u64, length u32, command
-    AppendReply:   success u8, match_index u64
+                   round u64, entry count u32,
+                   then per entry: term u64, length u32, command
+    AppendReply:   success u8, match_index u64, round u64
 """
 
 import struct
@@ -55,12 +56,16 @@ class AppendRequest:
     prev_log_term: int  # and its term, so the follower can check it has it
     entries: tuple[Entry, ...]
     commit_index: int  # how far the leader knows the log is committed
+    # The leader's heartbeat round, echoed back in the reply. Safe reads use
+    # it to know which replies came after they started (see read_index.py).
+    round: int = 0
 
 
 @dataclass(frozen=True)
 class AppendReply:
     success: bool
     match_index: int  # on success: the follower's log matches up to here
+    round: int = 0  # the round of the request this answers
 
 
 type Body = VoteRequest | VoteReply | AppendRequest | AppendReply
@@ -81,9 +86,9 @@ class CorruptMessage(Exception):
 _HEADER = struct.Struct("<BIIQ")  # kind, sender, receiver, term
 _VOTE_REQUEST = struct.Struct("<QQB")
 _VOTE_REPLY = struct.Struct("<BB")
-_APPEND_REQUEST = struct.Struct("<QQQI")
+_APPEND_REQUEST = struct.Struct("<QQQQI")
 _ENTRY = struct.Struct("<QI")  # term, command length
-_APPEND_REPLY = struct.Struct("<BQ")
+_APPEND_REPLY = struct.Struct("<BQQ")
 
 _KINDS: dict[type, int] = {VoteRequest: 1, VoteReply: 2, AppendRequest: 3, AppendReply: 4}
 
@@ -99,13 +104,17 @@ def encode(message: Message) -> bytes:
         case AppendRequest():
             parts.append(
                 _APPEND_REQUEST.pack(
-                    body.prev_log_index, body.prev_log_term, body.commit_index, len(body.entries)
+                    body.prev_log_index,
+                    body.prev_log_term,
+                    body.commit_index,
+                    body.round,
+                    len(body.entries),
                 )
             )
             for entry in body.entries:
                 parts += [_ENTRY.pack(entry.term, len(entry.command)), entry.command]
         case AppendReply():
-            parts.append(_APPEND_REPLY.pack(body.success, body.match_index))
+            parts.append(_APPEND_REPLY.pack(body.success, body.match_index, body.round))
     return b"".join(parts)
 
 
@@ -132,7 +141,7 @@ def _decode(data: bytes) -> tuple[Message, int]:
         body = VoteReply(_flag(granted), _flag(pre_vote))
         offset += _VOTE_REPLY.size
     elif kind == 3:
-        prev_index, prev_term, commit, count = _APPEND_REQUEST.unpack_from(data, offset)
+        prev_index, prev_term, commit, round_, count = _APPEND_REQUEST.unpack_from(data, offset)
         offset += _APPEND_REQUEST.size
         entries = []
         for _ in range(count):
@@ -142,10 +151,10 @@ def _decode(data: bytes) -> tuple[Message, int]:
                 raise ValueError("an entry runs past the end of the message")
             entries.append(Entry(entry_term, data[offset : offset + length]))
             offset += length
-        body = AppendRequest(prev_index, prev_term, tuple(entries), commit)
+        body = AppendRequest(prev_index, prev_term, tuple(entries), commit, round_)
     elif kind == 4:
-        success, match_index = _APPEND_REPLY.unpack_from(data, offset)
-        body = AppendReply(_flag(success), match_index)
+        success, match_index, round_ = _APPEND_REPLY.unpack_from(data, offset)
+        body = AppendReply(_flag(success), match_index, round_)
         offset += _APPEND_REPLY.size
     else:
         raise ValueError(f"unknown message kind {kind}")

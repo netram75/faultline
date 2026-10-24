@@ -23,6 +23,8 @@ EXAMPLES = [
     Message(1, 3, 7, AppendRequest(10, 6, (Entry(7, b"set x 1"), Entry(7, b"")), 9)),
     Message(3, 1, 7, AppendReply(success=True, match_index=12)),
     Message(3, 1, 7, AppendReply(success=False, match_index=0)),
+    Message(1, 3, 7, AppendRequest(10, 6, (), commit_index=9, round=42)),
+    Message(3, 1, 7, AppendReply(success=True, match_index=12, round=42)),
 ]
 
 

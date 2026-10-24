@@ -8,6 +8,8 @@ it drives it with a few calls:
     node.take_messages()    the messages the node wants sent now
     node.propose(command)   on the leader: add a command to the log
     node.take_committed()   committed commands, in order, to apply
+    node.read_index(ctx)    on the leader: start a safe read (see read_index.py)
+    node.take_reads()       reads that are safe to answer, with their read index
 
 That makes a whole cluster repeatable from one seed: a test (and later the
 fault simulator) decides when time passes and which messages arrive, in
@@ -46,6 +48,7 @@ from faultline.raft.messages import (
     VoteRequest,
 )
 from faultline.raft.progress import Progress
+from faultline.raft.read_index import ReadTracker
 
 # The command of the entry every new leader adds first (see _become_leader).
 # Callers skip it when they apply entries.
@@ -111,6 +114,7 @@ class Node:
         self._heartbeat_elapsed = 0
         # While leader: who answered us since the last quorum check
         self._heard_from: set[NodeId] = set()
+        self._reads = ReadTracker(node_id)
         self._quorum_elapsed = 0
         self._reset_election_timer()
 
@@ -218,6 +222,32 @@ class Node:
         self.last_applied = self.commit_index
         return list(enumerate(entries, start=start))
 
+    def read_index(self, ctx: int) -> bool:
+        """Start a safe read (Raft thesis, section 6.4). Returns False if this
+        node can't serve reads right now: it is not the leader, or it has not
+        committed an entry in its own term yet. The caller tries again later
+        or elsewhere.
+
+        Once a majority confirms this node is still the leader, take_reads()
+        returns (ctx, read_index). The caller answers the read when its state
+        machine has applied up to read_index.
+        """
+        if self.role is not Role.LEADER:
+            return False
+        # Step 1: until our no-op is committed, our commit index may be behind
+        # the real one
+        if self.log.term_at(self.commit_index) != self.term:
+            return False
+        self._reads.start(ctx, self.commit_index)
+        self._reads.confirm(self._is_majority)  # a cluster of one needs nobody else
+        # A heartbeat round now, not at the next tick, so the read is quick
+        self._broadcast_append()
+        return True
+
+    def take_reads(self) -> list[tuple[int, int]]:
+        """Reads confirmed since the last call, as (ctx, read_index)."""
+        return self._reads.take_ready()
+
     def take_messages(self) -> list[Message]:
         """Everything the node wants sent since the last call, in order."""
         messages, self._outbox = self._outbox, []
@@ -321,7 +351,7 @@ class Node:
         # too, and the new entries can go right after it.
         if not self.log.matches(request.prev_log_index, request.prev_log_term):
             hint = self._mismatch_hint(request.prev_log_index)
-            self._send(leader, AppendReply(success=False, match_index=hint))
+            self._send(leader, AppendReply(success=False, match_index=hint, round=request.round))
             return
         self._append_new_entries(request.prev_log_index, request.entries)
         last_new = request.prev_log_index + len(request.entries)
@@ -332,7 +362,7 @@ class Node:
         if request.commit_index > self.commit_index:
             self.commit_index = max(self.commit_index, min(request.commit_index, last_new))
         # log.append() synced the entries, so this promise holds after a crash
-        self._send(leader, AppendReply(success=True, match_index=last_new))
+        self._send(leader, AppendReply(success=True, match_index=last_new, round=request.round))
 
     def _mismatch_hint(self, prev_index: int) -> int:
         """Where the leader should try next, after our log failed its check at
@@ -375,6 +405,8 @@ class Node:
         # Any answer in our term, yes or no, means this follower still sees
         # us as its leader
         self._heard_from.add(follower)
+        self._reads.answered(follower, reply.round)
+        self._reads.confirm(self._is_majority)
         progress = self._progress[follower]
         if reply.success:
             progress.on_success(reply.match_index)
@@ -410,6 +442,7 @@ class Node:
         self.leader = self.id
         self._heard_from = set()
         self._quorum_elapsed = 0
+        self._reads = ReadTracker(self.id)
         self._progress = {
             peer: Progress(match=0, next=self.log.last_index + 1) for peer in self._others
         }
@@ -440,6 +473,7 @@ class Node:
             prev_log_term=self.log.term_at(prev_index),
             entries=entries,
             commit_index=self.commit_index,
+            round=self._reads.round,
         )
         self._send(peer, request)
         progress.sent(len(entries))
@@ -473,6 +507,8 @@ class Node:
             self._save(HardState(term, None))
         self.role = Role.FOLLOWER
         self.leader = None
+        # Reads still waiting are dropped. Their callers time out and retry.
+        self._reads = ReadTracker(self.id)
         self._reset_election_timer()
 
     def _answer_old_message(self, message: Message) -> None:
