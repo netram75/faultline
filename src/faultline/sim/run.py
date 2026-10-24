@@ -30,6 +30,7 @@ from dataclasses import dataclass
 
 from faultline.checker.check import Verdict, check
 from faultline.raft.node import Config
+from faultline.sim.bugs import switched_on
 from faultline.sim.client import Outcome
 from faultline.sim.nemesis import PROFILES, Nemesis
 from faultline.sim.network import NetworkFaults
@@ -40,6 +41,7 @@ from faultline.sim.world import World
 class Summary:
     seed: int
     faults: str
+    bug: str | None
     seconds: int
     ok: int
     failed: int
@@ -68,7 +70,8 @@ class Summary:
 
     def lines(self) -> list[str]:
         return [
-            f"seed {self.seed}, {self.seconds} s of {self.faults} faults, then calm",
+            f"seed {self.seed}, {self.seconds} s of {self.faults} faults, then calm"
+            + (f", with bug {self.bug} switched on" if self.bug else ""),
             f"operations: {self.ok} ok, {self.failed} failed, {self.unknown} unknown",
             f"ok while calm: {self.ok_while_calm}" + ("  <- STUCK" if self.stuck else ""),
             f"highest term: {self.highest_term}, crashes: {self.crashes}, "
@@ -89,8 +92,10 @@ def simulate(
     clients: int = 3,
     keys: int = 3,
     calm_seconds: int = 5,
+    bug: str | None = None,
 ) -> tuple[Summary, World, Nemesis]:
-    """Run one simulation. Raises SafetyViolation if a Raft rule breaks."""
+    """Run one simulation. Raises SafetyViolation if a Raft rule breaks.
+    bug switches on one of the known bugs in bugs.py for this run."""
     lossy = faults != "none"
     network = NetworkFaults(
         min_latency=1,
@@ -100,17 +105,19 @@ def simulate(
     )
     world = World(seed, nodes, clients, keys, config=_config_for(seed), faults=network)
     nemesis = Nemesis(world, PROFILES[faults])
-    world.start()
-    nemesis.start()
-    world.run_until(seconds * 1000)
+    with switched_on(bug):
+        world.start()
+        nemesis.start()
+        world.run_until(seconds * 1000)
 
-    nemesis.calm_down()
-    ok_before_calm = _count(world, Outcome.OK)
-    world.run_until((seconds + calm_seconds) * 1000)
+        nemesis.calm_down()
+        ok_before_calm = _count(world, Outcome.OK)
+        world.run_until((seconds + calm_seconds) * 1000)
 
     summary = Summary(
         seed=seed,
         faults=faults,
+        bug=bug,
         seconds=seconds,
         ok=_count(world, Outcome.OK),
         failed=_count(world, Outcome.FAIL),

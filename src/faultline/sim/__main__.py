@@ -4,6 +4,7 @@
     python -m faultline.sim --seed 1 --runs 100            # seeds 1 to 100, one line each
     python -m faultline.sim --seed 7 --history out.jsonl   # keep the history for the checker
     python -m faultline.sim --seed 7 --log                 # print what the nemesis did
+    python -m faultline.sim --seed 1 --runs 20 --bug early-ack   # see the checker catch a bug
 
 The exit code is 1 if any run broke a safety rule, got stuck, or gave
 answers that are not linearizable, so a script or CI job can run many seeds
@@ -17,6 +18,7 @@ import sys
 
 from faultline.checker.check import check
 from faultline.checker.explain import explain
+from faultline.sim.bugs import BUGS
 from faultline.sim.checks import SafetyViolation
 from faultline.sim.nemesis import PROFILES
 from faultline.sim.run import simulate
@@ -32,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--clients", type=int, default=3)
     parser.add_argument("--history", help="write the history to this file (single run only)")
     parser.add_argument("--log", action="store_true", help="print the nemesis log")
+    parser.add_argument("--bug", choices=sorted(BUGS), help="switch on a known bug (bugs.py)")
     args = parser.parse_args(argv)
 
     bad = 0
@@ -39,10 +42,11 @@ def main(argv: list[str] | None = None) -> int:
         replay = (
             f"python -m faultline.sim --seed {seed} --seconds {args.seconds} --faults {args.faults}"
             f" --nodes {args.nodes} --clients {args.clients}"
+            + (f" --bug {args.bug}" if args.bug else "")
         )
         try:
             summary, world, nemesis = simulate(
-                seed, args.seconds, args.faults, args.nodes, args.clients
+                seed, args.seconds, args.faults, args.nodes, args.clients, bug=args.bug
             )
         except SafetyViolation as violation:
             print(f"SAFETY VIOLATION: {violation}")
