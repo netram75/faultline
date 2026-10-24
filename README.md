@@ -16,7 +16,7 @@ writes on purpose, then checks that every answer the database gave was correct.
 - [x] Storage engine (LSM tree): flush, compaction, crash recovery ([how it works](docs/lsm.md))
 - [x] Raft: leader election and log replication ([how it works](docs/raft.md))
 - [x] Database on top of Raft: sessions, safe reads, snapshots ([how it works](docs/kv.md))
-- [ ] Fault simulator: fake network, fake disk, fake clock, one seed per run
+- [x] Fault simulator: fake network, fake disk, fake clock, one seed per run ([how it works](docs/simulator.md))
 - [ ] Correctness checker (linearizability) and a bug hunt
 - [ ] Real cluster: TCP, Redis protocol, Docker, chaos tests, metrics
 - [ ] Docs and release
@@ -34,6 +34,8 @@ src/faultline/
   raft/      Raft: messages, saved term and vote, the log on disk, the node,
              what the leader knows about each follower, safe reads, snapshots
   kv/        the database: commands, the state machine, one node of it
+  sim/       the fault simulator: clock, network, nodes, clients, nemesis,
+             safety checks (python -m faultline.sim)
   entry.py   the tombstone that marks a deleted key
 tests/    one folder per package, same names
 docs/     how each part works and why
