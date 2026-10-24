@@ -290,12 +290,8 @@ Two of these first slipped through, and the tests got better for it:
 
 ## Known limits
 
-- **The log never shrinks.** It grows forever, and after a restart every
-  committed entry is handed out again from index 1. Snapshots fix both, and
-  come with the database on top of Raft.
-- **No check quorum.** A leader cut off from the majority still thinks it is
-  leader until it hears a bigger term. Its writes can't commit, so that is
-  safe, but reads from it would not be. Safe reads come later.
+- Snapshots (so the log stops growing), check quorum and safe reads came
+  later, with the database on top of Raft. See [kv.md](kv.md).
 - **Fixed membership.** The cluster's nodes are set at start. Adding and
   removing nodes is a topic of its own (chapter 4 of the thesis).
 - **One sync per proposal.** Each `propose()` syncs on its own. Batching
