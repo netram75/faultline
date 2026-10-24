@@ -5,6 +5,7 @@ World only wires the parts together:
     node -> network -> node        Raft messages (network.py)
     client -> node                 requests: submit a write, start a read
     node -> client                 answers, routed by client id or read ctx
+    client -> history              every operation's start and end (history.py)
 
 Requests and answers between clients and nodes take a few milliseconds
 too. An answer can be lost on the way, at the network's drop rate, which is
@@ -19,6 +20,7 @@ from faultline.kv.state_machine import Result
 from faultline.raft.messages import Message, NodeId
 from faultline.raft.node import Config, Role
 from faultline.sim.client import CTX_SHIFT, ClientTimeouts, SimClient
+from faultline.sim.history import History
 from faultline.sim.loop import EventLoop
 from faultline.sim.network import Network, NetworkFaults
 from faultline.sim.node import SimNode
@@ -48,6 +50,10 @@ class World:
             c: SimClient(self.loop, c, ids, self._submit, self._read, key_names, timeouts)
             for c in range(1, clients + 1)
         }
+        self.history = History(self.loop)
+        for client in self.clients.values():
+            client.on_start = self.history.invoke
+            client.on_done = self.history.complete
         self._rng = random.Random(self.loop.seed_for("answers"))
         for node in self.nodes.values():
             node.on_result = self._send_result

@@ -75,10 +75,12 @@ class SimClient:
     ) -> None:
         self.id = client_id
         self.counts = {outcome: 0 for outcome in Outcome}
-        # Called when an operation ends: (operation, outcome, value read or
-        # result, start time, end time). The history (history.py) hooks in here.
-        self.on_done: Callable[[Operation, Outcome, Result | bytes | None, int, int], None] = (
-            lambda *args: None
+        # Called when an operation starts, and when it ends with its outcome
+        # and its result (a write's Result, or the value a read got). The
+        # history (history.py) hooks in here.
+        self.on_start: Callable[[ClientId, Operation], None] = lambda client, op: None
+        self.on_done: Callable[[ClientId, Operation, Outcome, Result | bytes | None], None] = (
+            lambda client, op, outcome, result: None
         )
         self._loop = loop
         self._rng = random.Random(loop.seed_for(f"client{client_id}"))
@@ -127,6 +129,7 @@ class SimClient:
             self._command = self._new_command(
                 CompareAndSet(self._op.key, self._op.expected, self._op.value)
             )
+        self.on_start(self.id, self._op)
         self._try()
 
     def _pick(self) -> Operation:
@@ -201,7 +204,7 @@ class SimClient:
         self.counts[outcome] += 1
         if outcome is Outcome.OK:
             self._remember(op, result)
-        self.on_done(op, outcome, result, self._started, self._loop.now)
+        self.on_done(self.id, op, outcome, result)
         self._loop.after(self._rng.randint(0, self._timeouts.max_think), self._begin)
 
     def _remember(self, op: Operation, result: Result | bytes | None) -> None:
