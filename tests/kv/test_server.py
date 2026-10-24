@@ -2,6 +2,7 @@ from faultline.fs.fake import FakeFileSystem
 from faultline.kv.commands import Command, CompareAndSet, Put
 from faultline.kv.server import KVNode
 from faultline.kv.state_machine import Result
+from faultline.raft.messages import InstallSnapshot, Message
 from faultline.raft.node import Role
 from tests.kv.cluster import KVCluster
 
@@ -113,3 +114,49 @@ def test_logs_stay_short_with_snapshots() -> None:
 
     cluster.check_same_data([b"k%d" % i for i in range(5)])
     assert cluster.nodes[2].machine.get(b"k0") == b"v60"
+
+
+def test_follower_far_behind_catches_up_from_a_snapshot() -> None:
+    cluster = KVCluster(3, seed=7, snapshot_every=10)
+    leader = cluster.wait_for_leader()
+    behind = next(i for i in cluster.ids if i != leader)
+    cluster.partition({behind})
+    for seq in range(1, 41):
+        cluster.submit(leader, Command(1, seq, Put(b"k%d" % (seq % 3), b"v%d" % seq)))
+        cluster.tick()
+    cluster.tick(3)
+    assert cluster.nodes[leader].raft.log.base_index > 0
+
+    cluster.heal()
+    cluster.tick(20)
+
+    assert cluster.nodes[behind].raft.snapshot is not None
+    assert cluster.nodes[behind].machine.get(b"k1") == b"v40"
+    cluster.check_same_data([b"k0", b"k1", b"k2"])
+
+
+def test_snapshot_saved_but_not_loaded_is_loaded_at_the_next_start() -> None:
+    cluster = KVCluster(3, seed=8, snapshot_every=10)
+    leader = cluster.wait_for_leader()
+    for seq in range(1, 21):
+        cluster.submit(leader, Command(1, seq, Put(b"k", b"v%d" % seq)))
+        cluster.tick()
+    cluster.tick(3)
+    snapshot = cluster.nodes[leader].raft.snapshot
+    assert snapshot is not None
+
+    # A brand new node gets the snapshot. Raft saves it, then the power goes
+    # before the state machine loads it.
+    fs = FakeFileSystem(seed=99)
+    fresh = KVNode.open(fs, "/fresh", 4, [1, 2, 3, 4])
+    fresh.raft.step(_install(snapshot.index, snapshot.term, snapshot.data))
+    fs.crash()
+
+    fresh = KVNode.open(fs, "/fresh", 4, [1, 2, 3, 4])
+
+    assert fresh.machine.applied_index == snapshot.index
+    assert fresh.machine.snapshot() == snapshot.data
+
+
+def _install(index: int, term: int, data: bytes) -> Message:
+    return Message(1, 4, term, InstallSnapshot(index, term, data))

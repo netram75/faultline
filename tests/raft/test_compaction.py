@@ -3,7 +3,7 @@
 import pytest
 
 from faultline.fs.fake import FakeFileSystem
-from faultline.raft.messages import AppendReply, AppendRequest, Entry, Message
+from faultline.raft.messages import AppendReply, AppendRequest, Entry, InstallSnapshot, Message
 from faultline.raft.node import Config, Node, Role
 from tests.raft.cluster import Cluster
 
@@ -88,3 +88,86 @@ def test_cluster_keeps_working_while_logs_are_compacted(seed: int) -> None:
     cluster.tick(10)
     cluster.check_logs()
     assert all(node.log.base_index > 30 for node in cluster.nodes.values())
+
+
+def follower() -> Node:
+    node = Node.open(FakeFileSystem(), "/n2", 2, [1, 2, 3], CONFIG)
+    entries = (Entry(1, b"a"), Entry(1, b"b"), Entry(2, b"c"))
+    node.step(Message(1, 2, 2, AppendRequest(0, 0, entries, commit_index=1)))
+    node.take_messages()
+    node.take_committed()
+    return node
+
+
+def test_follower_installs_a_snapshot() -> None:
+    node = follower()
+
+    node.step(Message(1, 2, 2, InstallSnapshot(last_index=10, last_term=2, data=b"state at 10")))
+
+    assert node.take_messages() == [Message(2, 1, 2, AppendReply(success=True, match_index=10))]
+    assert (node.log.base_index, node.log.last_index) == (10, 10)
+    assert (node.commit_index, node.last_applied) == (10, 10)
+    installed = node.take_snapshot()
+    assert installed is not None and installed.data == b"state at 10"
+    assert node.take_snapshot() is None  # handed out once
+    assert node.take_committed() == []
+
+
+def test_follower_keeps_entries_after_a_snapshot_it_agrees_with() -> None:
+    node = follower()
+
+    node.step(Message(1, 2, 2, InstallSnapshot(last_index=2, last_term=1, data=b"state at 2")))
+
+    assert (node.log.base_index, node.log.last_index) == (2, 3)
+    assert node.log.entry(3) == Entry(2, b"c")
+
+
+def test_follower_ignores_a_snapshot_it_already_has() -> None:
+    node = follower()  # commit index 1
+
+    node.step(Message(1, 2, 2, InstallSnapshot(last_index=1, last_term=1, data=b"old")))
+
+    assert node.take_snapshot() is None
+    assert node.log.base_index == 0
+    [reply] = node.take_messages()
+    assert reply.body == AppendReply(success=True, match_index=1)
+
+
+def test_installed_snapshot_survives_a_restart() -> None:
+    fs = FakeFileSystem()
+    node = Node.open(fs, "/n2", 2, [1, 2, 3], CONFIG)
+    node.step(Message(1, 2, 2, InstallSnapshot(last_index=10, last_term=2, data=b"state")))
+    fs.crash()
+
+    node = Node.open(fs, "/n2", 2, [1, 2, 3], CONFIG)
+
+    assert node.snapshot is not None and node.snapshot.index == 10
+    assert (node.log.base_index, node.commit_index) == (10, 10)
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_leader_sends_its_snapshot_to_a_follower_far_behind(seed: int) -> None:
+    cluster = Cluster(3, seed, CONFIG)
+    leader = cluster.wait_for_leader()
+    behind = next(i for i in cluster.ids if i != leader)
+    cluster.partition({behind})
+    for round_ in range(30):
+        cluster.propose(b"cmd%d" % round_)
+        cluster.tick()
+    cluster.tick(5)
+    for i in cluster.ids:
+        if i != behind:
+            node = cluster.nodes[i]
+            node.compact(node.last_applied, b"state at %d" % node.last_applied)
+
+    # Without pre-vote, the cut-off node has been running elections and comes
+    # back with a big term. That costs one election; whoever wins has the
+    # compacted log.
+    cluster.heal()
+    leader = cluster.wait_for_leader()
+    cluster.tick(20)
+
+    caught_up = cluster.nodes[behind]
+    assert caught_up.snapshot is not None
+    assert caught_up.log.last_index == cluster.nodes[leader].log.last_index
+    cluster.check_logs()

@@ -11,6 +11,7 @@ it drives it with a few calls:
     node.read_index(ctx)    on the leader: start a safe read (see read_index.py)
     node.take_reads()       reads that are safe to answer, with their read index
     node.compact(i, data)   the state machine saved a snapshot up to index i
+    node.take_snapshot()    a snapshot from the leader, to load into the state machine
 
 That makes a whole cluster repeatable from one seed: a test (and later the
 fault simulator) decides when time passes and which messages arrive, in
@@ -43,6 +44,7 @@ from faultline.raft.messages import (
     AppendRequest,
     Body,
     Entry,
+    InstallSnapshot,
     Message,
     NodeId,
     VoteReply,
@@ -98,6 +100,8 @@ class Node:
         self.log = log
         # The newest snapshot, if any. Everything up to its index is applied.
         self.snapshot = saved
+        # A snapshot the leader sent, until the state machine takes it
+        self._installed: Snapshot | None = None
         self.role = Role.FOLLOWER
         self.leader: NodeId | None = None
         # Highest log index known to be committed. Not saved: after a restart
@@ -193,6 +197,8 @@ class Node:
                 self._on_append_request(message.sender, request)
             case AppendReply() as reply:
                 self._on_append_reply(message.sender, reply)
+            case InstallSnapshot() as request:
+                self._on_install_snapshot(message.sender, request)
 
     def propose(self, command: bytes) -> int | None:
         """Add a command to the log. Returns its index, or None if this node is
@@ -267,6 +273,12 @@ class Node:
         snapshot.save(self._fs, self._directory, saved)
         self.snapshot = saved
         self.log.compact(index, saved.term)
+
+    def take_snapshot(self) -> Snapshot | None:
+        """A snapshot the leader sent us, once. The caller must replace its
+        state machine's data with it before applying anything after it."""
+        installed, self._installed = self._installed, None
+        return installed
 
     def take_messages(self) -> list[Message]:
         """Everything the node wants sent since the last call, in order."""
@@ -357,13 +369,7 @@ class Node:
             self._become_leader()
 
     def _on_append_request(self, leader: NodeId, request: AppendRequest) -> None:
-        # Same term as ours: bigger terms were taken on above. Only one node
-        # can win a term (each node votes once, and a win needs a majority),
-        # so the sender is that term's leader, and we lost or never ran.
-        assert self.role is not Role.LEADER, f"two leaders in term {self.term}"
-        self.role = Role.FOLLOWER
-        self.leader = leader
-        self._reset_election_timer()
+        self._accept_leader(leader)
         request = self._skip_compacted(request)
 
         # Raft paper, figure 2 (AppendEntries): our log must have the entry
@@ -384,6 +390,36 @@ class Node:
             self.commit_index = max(self.commit_index, min(request.commit_index, last_new))
         # log.append() synced the entries, so this promise holds after a crash
         self._send(leader, AppendReply(success=True, match_index=last_new, round=request.round))
+
+    def _accept_leader(self, leader: NodeId) -> None:
+        # Same term as ours: bigger terms were taken on above. Only one node
+        # can win a term (each node votes once, and a win needs a majority),
+        # so the sender is that term's leader, and we lost or never ran.
+        assert self.role is not Role.LEADER, f"two leaders in term {self.term}"
+        self.role = Role.FOLLOWER
+        self.leader = leader
+        self._reset_election_timer()
+
+    def _on_install_snapshot(self, leader: NodeId, request: InstallSnapshot) -> None:
+        """Raft paper, figure 13. The leader no longer has the entries we are
+        missing, so it sends its snapshot instead."""
+        self._accept_leader(leader)
+        if request.last_index > self.commit_index:
+            saved = Snapshot(request.last_index, request.last_term, request.data)
+            # Saved before anything else changes, and before the reply. If we
+            # crash before the state machine loads it, it is loaded at the
+            # next start (see kv/server.py).
+            snapshot.save(self._fs, self._directory, saved)
+            self.snapshot = saved
+            # Keeps the entries after it if our log agrees at last_index,
+            # else drops the whole log (see RaftLog.compact)
+            self.log.compact(request.last_index, request.last_term)
+            # A snapshot only ever holds committed entries
+            self.commit_index = self.last_applied = request.last_index
+            self._installed = saved
+        # Else we already have all of it, committed. Either way our log now
+        # matches the leader's up to last_index.
+        self._send(leader, AppendReply(success=True, match_index=request.last_index))
 
     def _skip_compacted(self, request: AppendRequest) -> AppendRequest:
         """Drop the entries of `request` that are already in our snapshot.
@@ -508,7 +544,8 @@ class Node:
         progress = self._progress[peer]
         if progress.next <= self.log.base_index:
             # The entries it needs were compacted away. Only the snapshot can
-            # bring it up to date, and sending one comes in the next step.
+            # bring it up to date.
+            self._send_snapshot(peer)
             return
         prev_index = progress.next - 1
         entries = self.log.entries_from(progress.next, self._config.max_entries_per_message)
@@ -546,6 +583,13 @@ class Node:
         self._become_follower(self.term)
         return True
 
+    def _send_snapshot(self, peer: NodeId) -> None:
+        saved = self.snapshot
+        # The log is only ever compacted after a snapshot is saved
+        assert saved is not None and saved.index >= self.log.base_index
+        self._send(peer, InstallSnapshot(saved.index, saved.term, saved.data))
+        self._progress[peer].sent_snapshot(saved.index)
+
     def _become_follower(self, term: int) -> None:
         if term != self.term:
             self._save(HardState(term, None))
@@ -562,7 +606,7 @@ class Node:
         match message.body:
             case VoteRequest() as request:
                 self._send(message.sender, VoteReply(granted=False, pre_vote=request.pre_vote))
-            case AppendRequest():
+            case AppendRequest() | InstallSnapshot():
                 self._send(message.sender, AppendReply(success=False, match_index=0))
 
     def _leader_seems_alive(self) -> bool:

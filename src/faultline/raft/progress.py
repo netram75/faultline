@@ -37,6 +37,13 @@ class Progress:
         if not self.probing:
             self.next += count
 
+    def sent_snapshot(self, index: int) -> None:
+        """We sent our snapshot, which ends at `index`. If it arrives, the
+        follower has everything up to there and the next append starts right
+        after it. Until its reply comes, we wait like a probe."""
+        self.next = index + 1
+        self.probing = True
+
     def on_success(self, match_index: int) -> None:
         # max(), because replies can arrive out of order and an old one must
         # not move us backwards

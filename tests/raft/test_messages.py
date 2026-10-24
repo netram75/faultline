@@ -7,6 +7,7 @@ from faultline.raft.messages import (
     AppendRequest,
     CorruptMessage,
     Entry,
+    InstallSnapshot,
     Message,
     VoteReply,
     VoteRequest,
@@ -25,6 +26,8 @@ EXAMPLES = [
     Message(3, 1, 7, AppendReply(success=False, match_index=0)),
     Message(1, 3, 7, AppendRequest(10, 6, (), commit_index=9, round=42)),
     Message(3, 1, 7, AppendReply(success=True, match_index=12, round=42)),
+    Message(1, 3, 7, InstallSnapshot(last_index=500, last_term=6, data=b"all the data")),
+    Message(1, 3, 7, InstallSnapshot(0, 0, b"")),
 ]
 
 

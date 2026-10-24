@@ -101,6 +101,22 @@ class StateMachine:
             parts += [_LENGTH.pack(len(key)), key, _LENGTH.pack(len(value)), value]
         return b"".join(parts)
 
+    def restore(self, data: bytes) -> None:
+        """Throw everything away and load a snapshot made by snapshot(), most
+        likely on the leader. Used when this node fell so far behind that the
+        leader no longer had the log entries it was missing.
+
+        One batch, so a crash leaves the old data or the new, never a mix.
+        """
+        pairs = _decode_pairs(data)
+        batch = WriteBatch()
+        for key, _ in self._engine.scan():
+            batch.delete(key)
+        for key, value in pairs:
+            batch.put(key, value)
+        self._engine.write(batch)
+        self.applied_index = int.from_bytes(dict(pairs).get(APPLIED_KEY, b""), "big")
+
     def close(self) -> None:
         self._engine.close()
 
@@ -149,3 +165,21 @@ def _decode_session(data: bytes) -> tuple[int, Result]:
     seq, ok, has_value = _SESSION.unpack_from(data)
     value = data[_SESSION.size :] if has_value else None
     return seq, Result(bool(ok), value)
+
+
+def _decode_pairs(data: bytes) -> list[tuple[bytes, bytes]]:
+    pairs = []
+    offset = 0
+    while offset < len(data):
+        key, offset = _read_blob(data, offset)
+        value, offset = _read_blob(data, offset)
+        pairs.append((key, value))
+    return pairs
+
+
+def _read_blob(data: bytes, offset: int) -> tuple[bytes, int]:
+    (length,) = _LENGTH.unpack_from(data, offset)
+    start = offset + _LENGTH.size
+    if start + length > len(data):
+        raise ValueError("snapshot data ends too early")
+    return data[start : start + length], start + length

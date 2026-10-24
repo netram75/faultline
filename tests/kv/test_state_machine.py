@@ -180,3 +180,21 @@ def test_snapshot_is_the_same_for_the_same_data() -> None:
     # Different disks, different flush timing, same data: same snapshot
     assert a.snapshot() == b.snapshot()
     assert b"k3" in a.snapshot()
+
+
+def test_restore_replaces_everything() -> None:
+    leader = StateMachine.open(FakeFileSystem(seed=1), DIR, SMALL)
+    for i in range(1, 21):
+        leader.apply(i, cmd(Put(b"k%d" % (i % 4), b"v%d" % i), seq=i))
+    behind = StateMachine.open(FakeFileSystem(seed=2), DIR, SMALL)
+    behind.apply(1, cmd(Put(b"only here", b"x"), client=9))
+
+    behind.restore(leader.snapshot())
+
+    assert behind.applied_index == 20
+    assert behind.get(b"only here") is None
+    assert behind.get(b"k0") == b"v20"
+    assert behind.snapshot() == leader.snapshot()
+    # The sessions came along: a late retry is still spotted
+    assert behind.apply(21, cmd(Put(b"k0", b"v4"), seq=4)) is None
+    assert behind.get(b"k0") == b"v20"

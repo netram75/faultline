@@ -25,7 +25,10 @@ which (its applied index is saved with the data), so those are skipped.
 Snapshots: once `snapshot_every` entries were applied since the log's base,
 the machine's data goes to Raft as a snapshot and Raft drops the log up to
 there (see raft/snapshot.py). That is what keeps the log from growing
-forever.
+forever. The other way round, a follower that fell too far behind gets the
+leader's snapshot, and its machine loads it in place of its own data. If we
+crash after Raft saved such a snapshot but before the machine loaded it, the
+machine is behind the snapshot at the next start, and loads it then.
 
 Folders: <directory>/raft for Raft's term, vote and log, and
 <directory>/data for the storage engine.
@@ -71,6 +74,8 @@ class KVNode:
             fs.sync_dir(os.path.dirname(os.path.normpath(directory)) or ".")
         raft = Node.open(fs, os.path.join(directory, "raft"), node_id, peers, config, seed)
         machine = StateMachine.open(fs, os.path.join(directory, "data"), options)
+        if raft.snapshot is not None and raft.snapshot.index > machine.applied_index:
+            machine.restore(raft.snapshot.data)
         node = cls(raft, machine, snapshot_every)
         node._drain()
         return node
@@ -124,9 +129,20 @@ class KVNode:
 
     def _drain(self) -> None:
         """Do everything Raft's last step made possible."""
+        self._load_snapshot()
         self._apply_committed()
         self._answer_reads()
         self._maybe_snapshot()
+
+    def _load_snapshot(self) -> None:
+        installed = self.raft.take_snapshot()
+        if installed is None:
+            return
+        self.machine.restore(installed.data)
+        # Writes we were waiting on at or below it are in there or not, we
+        # can't tell. Their clients time out and retry, which is safe.
+        for index in [i for i in self._waiting if i <= installed.index]:
+            del self._waiting[index]
 
     def _apply_committed(self) -> None:
         for index, entry in self.raft.take_committed():
