@@ -2,13 +2,17 @@
 
 Like tests/raft/cluster.py, but with the database on top. Messages can be
 lost, repeated and reordered, the network can be split, and nodes can crash
-and come back with their disks. Every running node's data is compared at
-the end with check_same_data().
+and come back with their disks. A crash can also land in the middle of a
+write: cut_power() makes one of the next disk calls fail with PowerCut, and
+the node goes down right there. Every running node's data is compared at the
+end with check_same_data().
 """
 
 import random
+from collections.abc import Callable
+from functools import partial
 
-from faultline.fs.fake import FakeFileSystem
+from faultline.fs.fake import FakeFileSystem, PowerCut
 from faultline.kv.commands import Command
 from faultline.kv.server import KVNode
 from faultline.kv.state_machine import Result
@@ -48,8 +52,7 @@ class KVCluster:
         for _ in range(rounds):
             for i in self.ids:
                 if i not in self.down:
-                    self.nodes[i].tick()
-                    self._collect(i)
+                    self._run(i, self.nodes[i].tick)
             self._deliver()
 
     def leader(self) -> NodeId | None:
@@ -72,14 +75,19 @@ class KVCluster:
         raise AssertionError(f"no leader after {max_rounds} rounds")
 
     def submit(self, i: NodeId, command: Command) -> bool:
-        ok = self.nodes[i].submit(command)
-        self._collect(i)
-        return ok
+        if i in self.down:
+            return False
+        return self._run(i, lambda: self.nodes[i].submit(command)) is True
 
     def read(self, i: NodeId, key: bytes, ctx: int) -> bool:
-        ok = self.nodes[i].read(key, ctx)
-        self._collect(i)
-        return ok
+        if i in self.down:
+            return False
+        return self._run(i, lambda: self.nodes[i].read(key, ctx)) is True
+
+    def cut_power(self, i: NodeId, steps: int) -> None:
+        """Node i loses power in the middle of whatever it is doing `steps`
+        disk calls from now."""
+        self.disks[i].cut_power_after(steps, keep_names=self.rng.random() < 0.5)
 
     def partition(self, *groups: set[NodeId]) -> None:
         rest = set(self.ids) - set().union(*groups)
@@ -96,6 +104,17 @@ class KVCluster:
         self.down.discard(i)
         self.nodes[i] = self._open(i)
         self._collect(i)
+
+    def _run[T](self, i: NodeId, action: Callable[[], T]) -> T | None:
+        """Run something on node i. If the power goes in the middle, the node
+        is down from here on, with whatever its disk kept."""
+        try:
+            result = action()
+        except PowerCut:
+            self.down.add(i)
+            return None
+        self._collect(i)
+        return result
 
     def check_same_data(self, keys: list[bytes]) -> None:
         """Every running node that applied as far as the leader has the same
@@ -134,5 +153,5 @@ class KVCluster:
                 continue
             copies = 2 if self.rng.random() < self.repeat_rate else 1
             for _ in range(copies):
-                self.nodes[message.receiver].step(message)
-            self._collect(message.receiver)
+                if message.receiver not in self.down:
+                    self._run(message.receiver, partial(self.nodes[message.receiver].step, message))
