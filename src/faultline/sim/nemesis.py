@@ -10,6 +10,13 @@ nemesis picks one fault, weighted by the profile, and does it:
   after a while.
 * **crash:** a running node loses power between two steps, and comes back
   after a while.
+* **reboot:** a running node dies and comes straight back, like a process
+  killed and restarted by its supervisor.
+
+On top of those, with reboot_after_step, any node may die right after any
+step it takes, and come straight back (see sim/node.py). That is how a node
+that forgot something it promised (a vote, say) gets caught: the promise is
+already on its way, and nothing else would land a crash in that exact gap.
 * **power cut:** a running node loses power in the middle of a disk call,
   somewhere in its next 50 (halfway through a flush, a compaction, a
   snapshot). It comes back after a while.
@@ -38,9 +45,11 @@ class Faults:
     mean_gap: int  # ms between two faults, on average. 0 means no faults at all.
     partition: float = 1.0  # how often each kind is picked, relative to the others
     crash: float = 1.0
+    reboot: float = 1.0
     power_cut: float = 1.0
     loss_burst: float = 1.0
     clock_skew: float = 1.0
+    reboot_after_step: float = 0.0  # chance a node dies right after a step
     max_down: int = 2
     shortest: int = 200  # how long a partition, burst or outage lasts, in ms
     longest: int = 3000
@@ -49,7 +58,10 @@ class Faults:
 PROFILES = {
     "none": Faults(mean_gap=0),
     "light": Faults(mean_gap=3000, power_cut=0.5, clock_skew=0.5),
-    "heavy": Faults(mean_gap=500),
+    "heavy": Faults(mean_gap=500, reboot_after_step=0.002),
+    # Nodes die right after a step all the time. The hardest test there is
+    # for "save it before you promise it".
+    "reboots": Faults(mean_gap=1000, crash=0.2, power_cut=0.2, reboot_after_step=0.03),
 }
 
 
@@ -67,6 +79,8 @@ class Nemesis:
         self._burst_generation = 0
 
     def start(self) -> None:
+        for node in self._world.nodes.values():
+            node.reboot_rate = self.faults.reboot_after_step
         if self.faults.mean_gap > 0:
             self._loop.after(self._gap(), self._strike)
 
@@ -81,6 +95,7 @@ class Nemesis:
         self._world.network.faults.drop_rate = self._normal_drop_rate
         for node in self._world.nodes.values():
             node.skew = 1.0
+            node.reboot_rate = 0.0
             node.disk.cancel_power_cut()
             node.start()
         self._note("calm: network healed, every node started, clocks fixed")
@@ -88,7 +103,7 @@ class Nemesis:
     def _strike(self) -> None:
         if self.faults.mean_gap == 0:
             return
-        kinds = ["partition", "crash", "power_cut", "loss_burst", "clock_skew"]
+        kinds = ["partition", "crash", "reboot", "power_cut", "loss_burst", "clock_skew"]
         weights = [getattr(self.faults, kind) for kind in kinds]
         kind = self._rng.choices(kinds, weights)[0]
         getattr(self, f"_{kind}")()
@@ -124,6 +139,14 @@ class Nemesis:
         self._world.nodes[node].crash(keep_names)
         self._note(f"crash node {node}" + (" (folder changes kept)" if keep_names else ""))
         self._loop.after(self._duration(), partial(self._restart, node))
+
+    def _reboot(self) -> None:
+        node = self._pick_up_node()
+        if node is None:
+            return
+        self._world.nodes[node].crash(keep_names=self._rng.random() < 0.5)
+        self._world.nodes[node].start()
+        self._note(f"reboot node {node}")
 
     def _power_cut(self) -> None:
         node = self._pick_up_node()

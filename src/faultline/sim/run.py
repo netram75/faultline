@@ -14,10 +14,17 @@ run on the spot with SafetyViolation.
 
 Everything comes from the seed. The same seed gives the same run, event for
 event, which the history digest at the end makes easy to see.
+
+The seed also picks Raft's settings: a short or long election timeout, and
+pre-vote and check quorum on or off. Short timeouts mean many elections,
+some of them with two candidates in the same term. That is where bugs about
+votes hide, and with the default settings they almost never come up.
 """
 
+import random
 from dataclasses import dataclass
 
+from faultline.raft.node import Config
 from faultline.sim.client import Outcome
 from faultline.sim.nemesis import PROFILES, Nemesis
 from faultline.sim.network import NetworkFaults
@@ -76,7 +83,7 @@ def simulate(
         drop_rate=0.01 if lossy else 0.0,
         duplicate_rate=0.01 if lossy else 0.0,
     )
-    world = World(seed, nodes, clients, keys, faults=network)
+    world = World(seed, nodes, clients, keys, config=_config_for(seed), faults=network)
     nemesis = Nemesis(world, PROFILES[faults])
     world.start()
     nemesis.start()
@@ -106,6 +113,17 @@ def simulate(
         history_digest=world.history.digest(),
     )
     return summary, world, nemesis
+
+
+def _config_for(seed: int) -> Config:
+    rng = random.Random(f"config/{seed}")
+    election_ticks = rng.choice([3, 5, 10, 10])
+    return Config(
+        election_ticks=election_ticks,
+        heartbeat_ticks=1 if election_ticks < 10 else 2,
+        pre_vote=rng.random() < 0.7,
+        check_quorum=rng.random() < 0.7,
+    )
 
 
 def _count(world: World, outcome: Outcome) -> int:

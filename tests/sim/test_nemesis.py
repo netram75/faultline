@@ -22,14 +22,24 @@ def test_heavy_does_every_kind_of_fault() -> None:
     world, nemesis = run(2, PROFILES["heavy"], 20_000)
     said = " ".join(what for _, what in nemesis.log)
 
-    for word in ["partition", "crash node", "power cut", "loss burst", "clock", "restart"]:
+    for word in [
+        "partition",
+        "crash node",
+        "reboot",
+        "power cut",
+        "loss burst",
+        "clock",
+        "restart",
+    ]:
         assert word in said
     assert sum(node.crashes + node.power_cuts for node in world.nodes.values()) > 3
 
 
 def test_never_more_than_max_down_nodes_down() -> None:
     world = World(seed=3)
-    nemesis = Nemesis(world, Faults(mean_gap=100, partition=0, loss_burst=0, clock_skew=0))
+    nemesis = Nemesis(
+        world, Faults(mean_gap=100, partition=0, reboot=0, loss_burst=0, clock_skew=0)
+    )
     world.start()
     nemesis.start()
     most_down = 0

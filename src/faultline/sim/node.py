@@ -14,6 +14,11 @@
   through a flush, a compaction or a snapshot. The node is down from that
   moment, like after crash().
 
+* **Dying right after a step.** With reboot_rate, after a step the node may
+  die at once and come straight back. Its replies are already on their way,
+  so if it promised something it had not saved (a vote, some log entries),
+  it has now forgotten a promise someone else is counting on.
+
 Ticks from before a crash must not keep running after a restart, or the
 node would tick twice as fast. Every crash bumps a generation number, and a
 tick from an older generation does nothing.
@@ -51,6 +56,7 @@ class SimNode:
         self.disk = FakeFileSystem(loop.seed_for(f"disk{node_id}"))
         self.kv: KVNode | None = None
         self.skew = 1.0
+        self.reboot_rate = 0.0
         self.ticks = 0
         self.crashes = 0
         self.power_cuts = 0
@@ -133,7 +139,10 @@ class SimNode:
             return  # a timer from before a crash
         self.ticks += 1
         self._run(self.kv.tick)
-        if self.up:
+        # Only if this is still the same life. If the node died and came back
+        # during that tick, start() already began a new round of ticks, and a
+        # second one would make it tick twice as fast.
+        if self.up and generation == self._generation:
             self._schedule_tick()
 
     def _run[T](self, action: Callable[[], T]) -> T | None:
@@ -143,6 +152,9 @@ class SimNode:
             self._power_went()
             return None
         self._flush()
+        if self._rng.random() < self.reboot_rate:
+            self.crash(keep_names=self._rng.random() < 0.5)
+            self.start()
         return result
 
     def _power_went(self) -> None:

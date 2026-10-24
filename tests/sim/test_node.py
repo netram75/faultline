@@ -110,3 +110,16 @@ def test_no_extra_ticks_after_a_restart() -> None:
     little.run(1000)
 
     assert node.ticks - before == 100
+
+
+def test_dying_right_after_a_step_does_not_speed_up_the_clock() -> None:
+    little = Little()
+    node = little.nodes[2]
+    node.reboot_rate = 0.05
+
+    little.run(1000)
+
+    # Every restart starts a fresh round of ticks. If an old round kept going
+    # too, the node would tick more and more often.
+    assert node.crashes >= 3
+    assert node.ticks <= 100
