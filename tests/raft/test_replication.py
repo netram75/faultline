@@ -4,7 +4,14 @@ a time. Whole clusters are tested in test_safety.py."""
 import pytest
 
 from faultline.fs.fake import FakeFileSystem
-from faultline.raft.messages import AppendReply, AppendRequest, Entry, Message, VoteReply
+from faultline.raft.messages import (
+    AppendReply,
+    AppendRequest,
+    Entry,
+    Message,
+    VoteReply,
+    VoteRequest,
+)
 from faultline.raft.node import Config, Node, Role
 
 PEERS = [1, 2, 3]
@@ -92,7 +99,9 @@ def test_success_moves_the_follower_forward() -> None:
     assert request.entries == (Entry(leader.term, b"b"),)
 
 
-def test_heartbeat_resends_what_is_not_acknowledged() -> None:
+def test_streaming_sends_each_entry_once() -> None:
+    # The follower is caught up, so new entries go out as they come, and a
+    # heartbeat does not send them again
     leader = new_leader()
     index = leader.propose(b"a")
     leader.take_messages()
@@ -101,8 +110,65 @@ def test_heartbeat_resends_what_is_not_acknowledged() -> None:
         leader.tick()
 
     (request,) = appends_to(leader, 3)
-    assert request.entries[-1] == Entry(leader.term, b"a")
-    assert request.prev_log_index + len(request.entries) == index
+    assert request.prev_log_index == index
+    assert request.entries == ()
+
+
+def test_probing_follower_gets_one_append_per_heartbeat() -> None:
+    leader = new_leader(caught_up=False)
+    for i in range(5):
+        leader.propose(f"cmd{i}".encode())
+    assert appends_to(leader, 2) == []  # no answer to the first probe yet
+
+    for _ in range(CONFIG.heartbeat_ticks):
+        leader.tick()
+
+    (request,) = appends_to(leader, 2)
+    assert request.entries == leader.log.entries_from(request.prev_log_index + 1)
+
+
+def test_lost_append_while_streaming_is_sent_again() -> None:
+    leader = new_leader()
+    index = leader.propose(b"a")
+    assert index is not None
+    leader.take_messages()  # and lost on the way
+
+    # The heartbeat assumes the follower has entry `index`. It does not.
+    leader.step(Message(2, 1, leader.term, AppendReply(success=False, match_index=index - 1)))
+
+    (request,) = appends_to(leader, 2)
+    assert request.prev_log_index == index - 1
+    assert request.entries == (Entry(leader.term, b"a"),)
+
+
+def test_a_far_behind_follower_gets_batches() -> None:
+    config = Config(election_ticks=10, heartbeat_ticks=2, pre_vote=False, max_entries_per_message=8)
+    fs = FakeFileSystem()
+    leader = Node.open(fs, "/node1", 1, PEERS, config)
+    while leader.role is not Role.LEADER:
+        leader.tick()
+        for message in leader.take_messages():
+            if isinstance(message.body, VoteRequest):
+                leader.step(Message(2, 1, leader.term, VoteReply(granted=True)))
+    for i in range(30):
+        leader.propose(f"cmd{i}".encode())
+    follower = Node.open(FakeFileSystem(), "/node2", 2, PEERS, config)
+    leader.take_messages()
+
+    sizes = []
+    for _ in range(20):
+        for _ in range(config.heartbeat_ticks):
+            leader.tick()
+        for request in appends_to(leader, 2):
+            sizes.append(len(request.entries))
+            follower.step(Message(1, 2, leader.term, request))
+        for reply in follower.take_messages():
+            leader.step(reply)
+        if follower.log.last_index == leader.log.last_index:
+            break
+
+    assert follower.log.entries_from(1) == leader.log.entries_from(1)
+    assert max(sizes) == 8
 
 
 def test_an_old_success_reply_does_not_move_back() -> None:

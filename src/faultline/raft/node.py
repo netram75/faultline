@@ -68,6 +68,8 @@ class Config:
     heartbeat_ticks: int = 2
     # Ask for pre-votes before a real election (Raft thesis, section 9.6)
     pre_vote: bool = True
+    # Most entries in one append. A follower far behind gets several.
+    max_entries_per_message: int = 64
 
 
 class Node:
@@ -187,8 +189,10 @@ class Node:
         # On our own disk before anyone else hears of it
         self.log.append([Entry(self.term, command)])
         self._advance_commit()  # a cluster of one needs nobody else
-        for peer in self._others:
-            self._send_append(peer)
+        for peer, progress in self._progress.items():
+            # A follower we are still probing gets it with the next probe
+            if not progress.probing:
+                self._send_append(peer)
         return self.log.last_index
 
     def take_committed(self) -> list[tuple[int, Entry]]:
@@ -364,6 +368,9 @@ class Node:
         if reply.success:
             progress.on_success(reply.match_index)
             self._advance_commit()
+            # A follower that is behind gets the next batch straight away
+            if progress.next <= self.log.last_index:
+                self._send_append(follower)
         else:
             progress.on_failure(reply.match_index)
             # Try again from the new spot straight away, not at the next heartbeat
@@ -414,13 +421,15 @@ class Node:
     def _send_append(self, peer: NodeId) -> None:
         progress = self._progress[peer]
         prev_index = progress.next - 1
+        entries = self.log.entries_from(progress.next, self._config.max_entries_per_message)
         request = AppendRequest(
             prev_log_index=prev_index,
             prev_log_term=self.log.term_at(prev_index),
-            entries=self.log.entries_from(progress.next),
+            entries=entries,
             commit_index=self.commit_index,
         )
         self._send(peer, request)
+        progress.sent(len(entries))
 
     def _become_follower(self, term: int) -> None:
         if term != self.term:
