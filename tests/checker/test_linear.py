@@ -1,4 +1,6 @@
-from faultline.checker.linear import linearize
+import pytest
+
+from faultline.checker.linear import OutOfBudget, linearize
 from faultline.checker.ops import Op
 from tests.checker.helpers import cas, get, numbered, put
 
@@ -84,3 +86,11 @@ def test_same_ops_placed_but_a_different_value() -> None:
     ops = numbered(put("a", 0, 10), put("b", 1, 11), get("a", 12, 13))
 
     assert linearize(ops) == [1, 0, 2]
+
+
+def test_budget_stops_a_long_search() -> None:
+    ops = numbered(*[put(str(i), i, None) for i in range(12)], get("nope", 20, 21))
+
+    with pytest.raises(OutOfBudget):
+        linearize(ops, budget=50)
+    assert linearize(ops) is None

@@ -36,10 +36,17 @@ from faultline.checker.model import State, step
 from faultline.checker.ops import Op
 
 
-def linearize(ops: Sequence[Op]) -> list[int] | None:
+class OutOfBudget(Exception):
+    """The search took more steps than it was allowed."""
+
+
+def linearize(ops: Sequence[Op], budget: int | None = None) -> list[int] | None:
     """Find an order for the ops of one key, sorted by start. Returns the op
     ids in that order (ops with no answer only if they were needed), or None
-    if there is no such order."""
+    if there is no such order.
+
+    budget is the most model steps to try. Past it, OutOfBudget is raised.
+    """
     # Sets of ops are ints: bit i is ops[i]
     must = sum(1 << i for i, op in enumerate(ops) if op.end is not None)
     seen: set[tuple[int, State]] = set()
@@ -50,9 +57,13 @@ def linearize(ops: Sequence[Op]) -> list[int] | None:
     placed = 0
     state: State = None  # every key starts missing
     first = 0  # try only candidates from here on, the ones before failed
+    steps = 0
 
     while placed & must != must:
         for i in _candidates(ops, placed, first):
+            steps += 1
+            if budget is not None and steps > budget:
+                raise OutOfBudget(f"no answer after {budget} steps")
             possible, after = step(state, ops[i])
             if possible and (placed | 1 << i, after) not in seen:
                 seen.add((placed | 1 << i, after))
