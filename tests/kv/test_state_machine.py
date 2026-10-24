@@ -26,10 +26,10 @@ def test_put_get_delete() -> None:
 def test_compare_and_set() -> None:
     sm = StateMachine.open(FakeFileSystem(), DIR)
 
-    assert sm.apply(1, cmd(CompareAndSet(b"k", None, b"a"))) == Result(True, b"a")
-    assert sm.apply(2, cmd(CompareAndSet(b"k", None, b"b"))) == Result(False, b"a")
-    assert sm.apply(3, cmd(CompareAndSet(b"k", b"a", b"c"))) == Result(True, b"c")
-    assert sm.apply(4, cmd(CompareAndSet(b"k", b"a", b"d"))) == Result(False, b"c")
+    assert sm.apply(1, cmd(CompareAndSet(b"k", None, b"a"), seq=1)) == Result(True, b"a")
+    assert sm.apply(2, cmd(CompareAndSet(b"k", None, b"b"), seq=2)) == Result(False, b"a")
+    assert sm.apply(3, cmd(CompareAndSet(b"k", b"a", b"c"), seq=3)) == Result(True, b"c")
+    assert sm.apply(4, cmd(CompareAndSet(b"k", b"a", b"d"), seq=4)) == Result(False, b"c")
     assert sm.get(b"k") == b"c"
 
 
@@ -88,5 +88,82 @@ def test_change_and_applied_index_are_saved_together() -> None:
             break  # the apply finished before the cut, every step was tried
         sm = StateMachine.open(fs, DIR)
         assert (sm.applied_index, sm.get(b"k")) in [(1, b"old"), (2, b"new")]
+        steps += 1
+    assert steps > 0
+
+
+def test_retry_gets_the_saved_result_and_runs_once() -> None:
+    sm = StateMachine.open(FakeFileSystem(), DIR)
+    first = cmd(CompareAndSet(b"k", None, b"a"), client=7, seq=1)
+
+    assert sm.apply(1, first) == Result(True, b"a")
+    # The client never got the answer and sends it again. Run a second time,
+    # the compare would fail. It must get the first answer instead.
+    assert sm.apply(2, first) == Result(True, b"a")
+    assert sm.get(b"k") == b"a"
+    assert sm.applied_index == 2
+
+
+def test_retry_does_not_undo_later_writes() -> None:
+    sm = StateMachine.open(FakeFileSystem(), DIR)
+    sm.apply(1, cmd(Put(b"k", b"one"), client=7, seq=1))
+    sm.apply(2, cmd(Put(b"k", b"two"), client=8, seq=1))
+
+    # A late copy of client 7's put must not overwrite client 8's newer value
+    assert sm.apply(3, cmd(Put(b"k", b"one"), client=7, seq=1)) == Result(ok=True)
+    assert sm.get(b"k") == b"two"
+
+
+def test_older_command_is_ignored() -> None:
+    sm = StateMachine.open(FakeFileSystem(), DIR)
+    sm.apply(1, cmd(Put(b"k", b"a"), client=7, seq=1))
+    sm.apply(2, cmd(Put(b"k", b"b"), client=7, seq=2))
+
+    assert sm.apply(3, cmd(Put(b"k", b"a"), client=7, seq=1)) is None
+    assert sm.get(b"k") == b"b"
+
+
+def test_clients_have_their_own_sessions() -> None:
+    sm = StateMachine.open(FakeFileSystem(), DIR)
+    sm.apply(1, cmd(Put(b"a", b"1"), client=1, seq=1))
+    sm.apply(2, cmd(Put(b"b", b"2"), client=2, seq=1))
+
+    assert sm.get(b"a") == b"1"
+    assert sm.get(b"b") == b"2"
+
+
+def test_sessions_survive_a_restart() -> None:
+    fs = FakeFileSystem()
+    sm = StateMachine.open(fs, DIR, SMALL)
+    first = cmd(CompareAndSet(b"k", None, b"a"), client=7, seq=1)
+    sm.apply(1, first)
+    fs.crash()
+
+    sm = StateMachine.open(fs, DIR, SMALL)
+
+    assert sm.apply(2, first) == Result(True, b"a")
+    assert sm.get(b"k") == b"a"
+
+
+def test_session_is_saved_with_the_change() -> None:
+    # Power cut at every step of a compare-and-set, then the client retries.
+    # Whether or not the first try made it, the retry must end with the key
+    # set once and the answer the first try would have given.
+    steps = 0
+    while True:
+        fs = FakeFileSystem(seed=steps)
+        sm = StateMachine.open(fs, DIR)
+        sm.apply(1, b"")
+        first = cmd(CompareAndSet(b"k", None, b"a"), client=7, seq=1)
+        fs.cut_power_after(steps)
+        try:
+            sm.apply(2, first)
+        except PowerCut:
+            pass
+        else:
+            break
+        sm = StateMachine.open(fs, DIR)
+        assert sm.apply(sm.applied_index + 1, first) == Result(True, b"a")
+        assert sm.get(b"k") == b"a"
         steps += 1
     assert steps > 0

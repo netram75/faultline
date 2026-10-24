@@ -10,6 +10,7 @@ The keys are kept apart by a one-byte prefix, so a user key can never clash
 with ours:
 
     b"d" + key       the user's data
+    b"s" + client    the client's session: its last seq and that result
     b"m/applied"     index of the last applied command, 8 bytes, big endian
 
 The most important line in this file is the one that writes the data change
@@ -17,17 +18,33 @@ and the new applied index in **one** WriteBatch. A batch is atomic (see
 lsm/batch.py), so after a crash both are there or neither is. If they were
 two writes, a crash between them would either lose the command or apply it
 twice after the restart.
+
+**Sessions** (Raft thesis, section 6.3). A client that gets no answer can't
+tell whether its command was lost or only the answer was. So it sends the
+same command again, with the same sequence number. If the first one did run,
+a plain "apply it again" would run it twice: a compare-and-set would now
+fail, an increment would count twice. So for every client we remember the
+last seq we ran and its result. A command with that seq is a repeat: it gets
+the saved result and changes nothing. The session is written in the same
+batch as the change, for the same reason as the applied index.
+
+Clients send one command at a time and wait for its answer, so remembering
+the last one per client is enough.
 """
 
+import struct
 from dataclasses import dataclass
 from typing import Self
 
 from faultline.fs import FileSystem
-from faultline.kv.commands import CompareAndSet, Delete, Operation, Put, decode
+from faultline.kv.commands import ClientId, Command, CompareAndSet, Delete, Operation, Put, decode
 from faultline.lsm import Engine, Options, WriteBatch
 
 DATA = b"d"
+SESSION = b"s"
 APPLIED_KEY = b"m/applied"
+
+_SESSION = struct.Struct(">QBB")  # seq, ok, has_value, then the value
 
 
 @dataclass(frozen=True)
@@ -54,7 +71,8 @@ class StateMachine:
 
     def apply(self, index: int, command: bytes) -> Result | None:
         """Apply the command at log index `index`. Returns its result, or
-        None for the empty command a new leader adds (a no-op).
+        None for the empty command a new leader adds (a no-op) and for a
+        command older than the client's latest, which nobody waits for.
 
         Indexes must come one after another. The caller skips anything at or
         below applied_index, which it already applied before a restart.
@@ -62,7 +80,7 @@ class StateMachine:
         if index != self.applied_index + 1:
             raise ValueError(f"applying {index} after {self.applied_index}")
         batch = WriteBatch()
-        result = None if command == b"" else self._run(decode(command).op, batch)
+        result = None if command == b"" else self._run_once(decode(command), batch)
         # Same batch as the change itself. See the top of this file.
         batch.put(APPLIED_KEY, index.to_bytes(8, "big"))
         self._engine.write(batch)
@@ -71,6 +89,21 @@ class StateMachine:
 
     def close(self) -> None:
         self._engine.close()
+
+    def _run_once(self, command: Command, batch: WriteBatch) -> Result | None:
+        """Run the command, unless this client already sent it. See the top of
+        this file."""
+        key = _session_key(command.client)
+        saved = self._engine.get(key)
+        if saved is not None:
+            last_seq, last_result = _decode_session(saved)
+            if command.seq == last_seq:
+                return last_result  # a retry: same answer, nothing runs again
+            if command.seq < last_seq:
+                return None  # older still: the client has moved on
+        result = self._run(command.op, batch)
+        batch.put(key, _encode_session(command.seq, result))
+        return result
 
     def _run(self, op: Operation, batch: WriteBatch) -> Result:
         """Work out what `op` does and add its change to `batch`."""
@@ -87,3 +120,18 @@ class StateMachine:
                     return Result(ok=False, value=current)
                 batch.put(DATA + op.key, op.value)
                 return Result(ok=True, value=op.value)
+
+
+def _session_key(client: ClientId) -> bytes:
+    return SESSION + client.to_bytes(8, "big")
+
+
+def _encode_session(seq: int, result: Result) -> bytes:
+    header = _SESSION.pack(seq, result.ok, result.value is not None)
+    return header + (result.value or b"")
+
+
+def _decode_session(data: bytes) -> tuple[int, Result]:
+    seq, ok, has_value = _SESSION.unpack_from(data)
+    value = data[_SESSION.size :] if has_value else None
+    return seq, Result(bool(ok), value)
