@@ -333,3 +333,42 @@ def test_follower_commit_index_never_goes_down() -> None:
     # no reason to forget that entry 2 is committed
     node.step(Message(1, 2, 1, AppendRequest(0, 0, (Entry(1, b"a"),), 5)))
     assert node.commit_index == 2
+
+
+def test_committed_entries_are_handed_out_once_in_order() -> None:
+    leader = new_leader()
+    a = leader.propose(b"a")
+    b = leader.propose(b"b")
+    assert a is not None and b is not None
+    assert leader.take_committed() == []
+
+    ack(leader, 2, b)
+
+    assert leader.take_committed() == [(a, Entry(leader.term, b"a")), (b, Entry(leader.term, b"b"))]
+    assert leader.last_applied == b
+    assert leader.take_committed() == []
+
+
+def test_follower_hands_out_what_is_committed_and_no_more() -> None:
+    node = new_node(2)
+
+    node.step(Message(1, 2, 1, AppendRequest(0, 0, (Entry(1, b"a"), Entry(1, b"b")), 1)))
+
+    assert node.take_committed() == [(1, Entry(1, b"a"))]
+    node.step(Message(1, 2, 1, AppendRequest(2, 1, (), 2)))
+    assert node.take_committed() == [(2, Entry(1, b"b"))]
+
+
+def test_after_a_restart_entries_are_handed_out_again() -> None:
+    # Nothing records what was applied yet. Snapshots fix that later.
+    fs = FakeFileSystem()
+    node = new_node(2, fs)
+    node.step(Message(1, 2, 1, AppendRequest(0, 0, (Entry(1, b"a"),), 1)))
+    node.take_committed()
+
+    fs.crash()
+    restarted = new_node(2, fs)
+    assert restarted.take_committed() == []  # the commit index is not saved
+    restarted.step(Message(1, 2, 1, AppendRequest(1, 1, (), 1)))
+
+    assert restarted.take_committed() == [(1, Entry(1, b"a"))]

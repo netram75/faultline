@@ -7,6 +7,7 @@ it drives it with a few calls:
     node.step(message)      a message arrived from another node
     node.take_messages()    the messages the node wants sent now
     node.propose(command)   on the leader: add a command to the log
+    node.take_committed()   committed commands, in order, to apply
 
 That makes a whole cluster repeatable from one seed: a test (and later the
 fault simulator) decides when time passes and which messages arrive, in
@@ -85,6 +86,8 @@ class Node:
         # Highest log index known to be committed. Not saved: after a restart
         # the leader tells us again.
         self.commit_index = 0
+        # Last index handed out by take_committed()
+        self.last_applied = 0
         self._fs = fs
         self._directory = directory
         self._others = sorted(set(peers) - {node_id})
@@ -181,6 +184,21 @@ class Node:
         for peer in self._others:
             self._send_append(peer)
         return self.log.last_index
+
+    def take_committed(self) -> list[tuple[int, Entry]]:
+        """Committed entries not handed out yet, as (index, entry), in log
+        order. The caller applies them to its state machine.
+
+        Once committed, an entry is final on every node that will ever be
+        leader, so applying it is safe. Every node hands out the same entries
+        in the same order, which is the whole point of Raft.
+        """
+        if self.commit_index <= self.last_applied:
+            return []
+        start = self.last_applied + 1
+        entries = self.log.entries_from(start, self.commit_index - self.last_applied)
+        self.last_applied = self.commit_index
+        return list(enumerate(entries, start=start))
 
     def take_messages(self) -> list[Message]:
         """Everything the node wants sent since the last call, in order."""
