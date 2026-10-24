@@ -1,8 +1,10 @@
+import random
+
 import pytest
 
-from faultline.checker.linear import OutOfBudget, linearize
+from faultline.checker.linear import OutOfBudget, _Memo, linearize
 from faultline.checker.ops import Op
-from tests.checker.helpers import cas, get, numbered, put
+from tests.checker.helpers import cas, get, numbered, put, register_history
 
 
 def values(ops: list[Op], order: list[int] | None) -> list[str | None]:
@@ -89,8 +91,60 @@ def test_same_ops_placed_but_a_different_value() -> None:
 
 
 def test_budget_stops_a_long_search() -> None:
-    ops = numbered(*[put(str(i), i, None) for i in range(12)], get("nope", 20, 21))
+    ops = numbered(*[put(str(i), i, 100 + i) for i in range(10)], get("nope", 200, 201))
 
     with pytest.raises(OutOfBudget):
         linearize(ops, budget=50)
     assert linearize(ops) is None
+
+
+def test_old_writes_with_no_answer_do_not_slow_it_down() -> None:
+    # A long history, plus forty writes that never got an answer and whose
+    # values nobody read. Each one may happen at any moment, so each could
+    # be tried in front of every cas that "did not match". The search must
+    # not do that: it needs about 2000 steps with or without them.
+    ops = register_history(random.Random(3), 600)
+    lost = [put(f"lost {i}", -100 + i, None) for i in range(40)]
+
+    assert linearize(numbered(*lost, *ops), budget=20_000) is not None
+
+
+@pytest.mark.parametrize("seed", range(1, 5))
+def test_writes_with_no_answer_read_at_the_very_end(seed: int) -> None:
+    # Ten writes that got no answer, each read once after everything else.
+    # Each one could be used up early, in front of some cas that "did not
+    # match". The search must see at once that its read at the end then has
+    # nothing left to read, not when it gets there.
+    ops = register_history(random.Random(seed), 300)
+    lost = [put(f"lost {i}", -100 + i, None) for i in range(10)]
+    late = max(op.end for op in ops if op.end is not None)
+    reads = [get(f"lost {i}", late + 1 + 2 * i, late + 2 + 2 * i) for i in range(10)]
+
+    order = linearize(numbered(*lost, *ops, *reads), budget=15_000)
+
+    # Each lost write goes in right before its read
+    assert order is not None
+    assert order[-20:] == [i for n in range(10) for i in (n, len(lost) + len(ops) + n)]
+
+
+def test_memo_skips_a_place_reached_with_more_unanswered_ops_used() -> None:
+    ops = numbered(put("a", 0, 1), put("x", 2, None), put("y", 3, None))
+    memo = _Memo(ops)
+
+    assert memo.first_visit(0b001, "a")
+    assert not memo.first_visit(0b001, "a")
+    # Same answered ops and value, with x used up too: nothing new
+    assert not memo.first_visit(0b011, "a")
+    # A different value is a different place
+    assert memo.first_visit(0b011, "x")
+
+
+def test_memo_keeps_a_place_reached_with_fewer_unanswered_ops_used() -> None:
+    ops = numbered(put("a", 0, 1), put("x", 2, None), put("y", 3, None))
+    memo = _Memo(ops)
+
+    assert memo.first_visit(0b111, "a")
+    # Here x and y are both still free, so more can happen from here
+    assert memo.first_visit(0b001, "a")
+    assert memo.first_visit(0b101, "b")
+    assert memo.first_visit(0b011, "b")

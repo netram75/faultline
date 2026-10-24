@@ -14,6 +14,7 @@ def test_a_run_sums_itself_up() -> None:
     assert summary.crashes + summary.power_cuts > 0
     assert summary.highest_term > 1
     assert summary.checks > 1000
+    assert summary.linearizable == "ok"
     assert not summary.stuck
     assert len(nemesis.log) > 5
 
@@ -35,6 +36,7 @@ def test_cli_single_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> N
     assert code == 0
     assert "seed 3, 5 s of heavy faults, then calm" in out
     assert "safety checks passed" in out
+    assert "linearizable: ok" in out
     assert "calm: network healed" in out
     assert len(History.from_jsonl(path.read_text()).events) > 50
 

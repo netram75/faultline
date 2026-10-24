@@ -23,8 +23,9 @@ from faultline.sim.history import History
 
 type Verdict = Literal["ok", "bad", "unknown"]
 
-# Model steps per key. A 30 second simulator run needs a few thousand.
-BUDGET = 200_000
+# Model steps per key, about a second of searching. A 30 second simulator
+# run needs a few thousand.
+BUDGET = 2_000_000
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,5 @@
 from faultline.checker.check import check
+from faultline.checker.ops import Op
 from faultline.sim.run import simulate
 from tests.checker.helpers import get, numbered, put
 
@@ -43,23 +44,22 @@ def test_an_ok_key_comes_with_an_order() -> None:
     assert result.order == [1, 0]
 
 
+def hard(key: str = "k") -> list[Op]:
+    # Ten puts, all overlapping, then a read of a value none of them wrote.
+    # Proving that bad means trying every set of the puts that could have
+    # gone first, with every one of them last.
+    return [put(str(i), i, 100 + i, key) for i in range(10)] + [get("nope", 200, 201, key)]
+
+
 def test_out_of_budget_is_unknown_not_bad() -> None:
-    # Twelve writes with no answer, all overlapping, and a read of a value
-    # none of them wrote. Proving that bad means trying every subset of the
-    # writes, in every order the memo can't skip.
-    ops = numbered(*[put(str(i), i, None) for i in range(12)], get("nope", 20, 21))
+    ops = numbered(*hard())
 
     assert check(ops, budget=50).verdict == "unknown"
     assert check(ops).verdict == "bad"
 
 
 def test_unknown_does_not_hide_a_bad_key() -> None:
-    ops = numbered(
-        *[put(str(i), i, None, key="k1") for i in range(12)],
-        get("nope", 20, 21, key="k1"),
-        put("a", 30, 31, key="k2"),
-        get("b", 32, 33, key="k2"),
-    )
+    ops = numbered(*hard("k1"), put("a", 300, 301, key="k2"), get("b", 302, 303, key="k2"))
 
     report = check(ops, budget=50)
 

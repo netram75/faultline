@@ -160,9 +160,10 @@ Two lessons from this table:
 
 - **Disks are instant.** A sync takes no simulated time, so slow disks are
   not simulated, and neither is a disk that lies about syncing.
-- **Safety, not linearizability, is checked here.** The checks look inside
-  Raft. Whether the answers clients got are consistent is the job of the
-  checker (Day 8), which reads the history this produces.
+- **Linearizability is checked once, at the end.** The safety checks look
+  inside Raft after every step. The linearizability checker
+  (`src/faultline/checker/`) reads the whole history when the run is over,
+  so a run that goes wrong early still runs to the end before it is caught.
 - **Clients know every node.** They don't need to discover the cluster.
 - **One process.** Real concurrency (threads, real sockets) is not exercised
   here. That is what the real cluster and its chaos tests are for (Day 9).

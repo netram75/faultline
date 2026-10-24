@@ -19,7 +19,7 @@ Every operation ends one of three ways:
   any log.
 * **unknown:** the client gave up waiting on a write that some node did
   accept. It may have happened or not, and may still happen later. The
-  checker (Day 8) has to allow both.
+  checker has to allow both (see checker/ops.py).
 """
 
 import random

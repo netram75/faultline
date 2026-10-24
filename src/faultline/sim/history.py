@@ -1,6 +1,6 @@
 """The history: every client operation, when it started and how it ended.
 
-This is what the correctness checker (Day 8) reads. It does not look inside
+This is what the linearizability checker (checker/) reads. It does not look inside
 the cluster at all. It only asks: could a single copy of the data, doing one
 operation at a time, have given exactly these answers? That property is
 called linearizability, and it is what a client of a strongly consistent

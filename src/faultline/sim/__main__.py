@@ -5,14 +5,18 @@
     python -m faultline.sim --seed 7 --history out.jsonl   # keep the history for the checker
     python -m faultline.sim --seed 7 --log                 # print what the nemesis did
 
-The exit code is 1 if any run broke a safety rule or got stuck, so a script
-or CI job can run many seeds and stop at the first bad one. Every failure
-prints the exact command that replays it.
+The exit code is 1 if any run broke a safety rule, got stuck, or gave
+answers that are not linearizable, so a script or CI job can run many seeds
+and stop at the first bad one. Every failure prints the exact command that
+replays it. A history that is not linearizable is also explained, in the
+few operations where it first goes wrong.
 """
 
 import argparse
 import sys
 
+from faultline.checker.check import check
+from faultline.checker.explain import explain
 from faultline.sim.checks import SafetyViolation
 from faultline.sim.nemesis import PROFILES
 from faultline.sim.run import simulate
@@ -34,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     for seed in range(args.seed, args.seed + args.runs):
         replay = (
             f"python -m faultline.sim --seed {seed} --seconds {args.seconds} --faults {args.faults}"
+            f" --nodes {args.nodes} --clients {args.clients}"
         )
         try:
             summary, world, nemesis = simulate(
@@ -47,10 +52,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.runs == 1:
             print("\n".join(summary.lines()))
         else:
-            status = "STUCK" if summary.stuck else "ok"
+            status = ", ".join(summary.problems) or "ok"
             print(f"seed {seed}: {status}, {summary.ok} ops ok, digest {summary.history_digest}")
         if summary.stuck:
             print(f"replay with: {replay} --log")
+        if summary.linearizable == "bad":
+            for result in check(world.history).bad_keys:
+                explanation = explain(result)
+                if explanation is not None:
+                    print("\n".join(explanation.lines()))
+            print(f"replay with: {replay} --history history.jsonl")
+        if summary.linearizable == "unknown":
+            print("the checker ran out of steps on some key, try a shorter run")
+        if summary.problems:
             bad += 1
         if args.log:
             for time, what in nemesis.log:

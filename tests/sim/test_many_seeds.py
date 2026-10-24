@@ -1,5 +1,6 @@
-"""The simulator's two promises, tested: the same seed gives the same run,
-and no seed ever breaks a safety rule or gets the cluster stuck.
+"""The simulator's promises, tested: the same seed gives the same run, and
+no seed ever breaks a safety rule, gets the cluster stuck, or gives clients
+answers that are not linearizable.
 
 Each run here is short, so the whole file takes a few seconds. Longer and
 many more runs are for the command line: python -m faultline.sim --runs 1000
@@ -29,6 +30,7 @@ def test_heavy_faults_five_nodes(seed: int) -> None:
     summary, _, _ = simulate(seed, seconds=10, faults="heavy")
 
     assert not summary.stuck
+    assert summary.linearizable == "ok"
 
 
 @pytest.mark.parametrize("seed", range(20))
@@ -37,6 +39,7 @@ def test_heavy_faults_three_nodes(seed: int) -> None:
     summary, _, _ = simulate(seed + 1000, seconds=10, faults="heavy", nodes=3)
 
     assert not summary.stuck
+    assert summary.linearizable == "ok"
 
 
 @pytest.mark.parametrize("seed", range(100))
@@ -46,6 +49,7 @@ def test_reboot_storm(seed: int) -> None:
     summary, _, _ = simulate(seed + 3000, seconds=3, faults="reboots")
 
     assert not summary.stuck
+    assert summary.linearizable == "ok"
 
 
 @pytest.mark.parametrize("seed", range(10))
@@ -53,4 +57,5 @@ def test_light_faults_many_clients(seed: int) -> None:
     summary, _, _ = simulate(seed + 2000, seconds=10, faults="light", clients=8, keys=2)
 
     assert not summary.stuck
+    assert summary.linearizable == "ok"
     assert summary.ok > 300

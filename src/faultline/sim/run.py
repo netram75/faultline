@@ -12,6 +12,10 @@ A run has two parts:
 Safety is checked all the way through (checks.py). A broken rule stops the
 run on the spot with SafetyViolation.
 
+At the end, the whole history goes through the linearizability checker
+(see checker/). The safety checks look inside Raft. The checker looks only
+at what clients saw, which is what a user of the database cares about.
+
 Everything comes from the seed. The same seed gives the same run, event for
 event, which the history digest at the end makes easy to see.
 
@@ -24,6 +28,7 @@ votes hide, and with the default settings they almost never come up.
 import random
 from dataclasses import dataclass
 
+from faultline.checker.check import Verdict, check
 from faultline.raft.node import Config
 from faultline.sim.client import Outcome
 from faultline.sim.nemesis import PROFILES, Nemesis
@@ -47,11 +52,19 @@ class Summary:
     dropped: int
     snapshots: int
     checks: int
+    linearizable: Verdict
     history_digest: str
 
     @property
     def stuck(self) -> bool:
         return self.ok_while_calm == 0
+
+    @property
+    def problems(self) -> list[str]:
+        problems = ["STUCK"] if self.stuck else []
+        if self.linearizable == "bad":
+            problems.append("NOT LINEARIZABLE")
+        return problems
 
     def lines(self) -> list[str]:
         return [
@@ -62,6 +75,8 @@ class Summary:
             f"power cuts: {self.power_cuts}, snapshots taken: {self.snapshots}",
             f"messages: {self.messages} sent, {self.dropped} dropped",
             f"safety checks passed: {self.checks}",
+            f"linearizable: {self.linearizable}"
+            + ("  <- NOT LINEARIZABLE" if self.linearizable == "bad" else ""),
             f"history digest: {self.history_digest}",
         ]
 
@@ -110,6 +125,7 @@ def simulate(
             1 for n in world.nodes.values() if n.kv is not None and n.kv.raft.snapshot is not None
         ),
         checks=world.checker.checks,
+        linearizable=check(world.history).verdict,
         history_digest=world.history.digest(),
     )
     return summary, world, nemesis
