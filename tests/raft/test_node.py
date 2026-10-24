@@ -273,10 +273,6 @@ def elect(node: Node) -> None:
             node.step(Message(voter, node.id, node.term, VoteReply(granted=True)))
 
 
-def heartbeat(node: Node) -> AppendRequest:
-    return AppendRequest(node.log.last_index, node.log.last_term, (), commit_index=0)
-
-
 def test_majority_of_votes_wins() -> None:
     node = new_node()
     tick_until_election(node)
@@ -286,11 +282,9 @@ def test_majority_of_votes_wins() -> None:
 
     assert node.role is Role.LEADER
     assert node.leader == 1
-    # Heartbeats go out straight away
-    assert node.take_messages() == [
-        Message(1, 2, 1, heartbeat(node)),
-        Message(1, 3, 1, heartbeat(node)),
-    ]
+    # The new leader's no-op goes out straight away, and works as a heartbeat
+    no_op = AppendRequest(0, 0, (Entry(1, b""),), commit_index=0)
+    assert node.take_messages() == [Message(1, 2, 1, no_op), Message(1, 3, 1, no_op)]
 
 
 def test_no_votes_no_win() -> None:

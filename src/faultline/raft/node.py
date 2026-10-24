@@ -47,6 +47,10 @@ from faultline.raft.messages import (
 )
 from faultline.raft.progress import Progress
 
+# The command of the entry every new leader adds first (see _become_leader).
+# Callers skip it when they apply entries.
+NO_OP = b""
+
 
 class Role(Enum):
     FOLLOWER = "follower"
@@ -176,6 +180,8 @@ class Node:
         The command is not committed yet when this returns. It is committed
         once a majority has it.
         """
+        if command == NO_OP:
+            raise ValueError("an empty command is the leader's no-op, and can't be proposed")
         if self.role is not Role.LEADER:
             return None
         # On our own disk before anyone else hears of it
@@ -387,6 +393,13 @@ class Node:
         self._progress = {
             peer: Progress(match=0, next=self.log.last_index + 1) for peer in self._others
         }
+        # Raft paper, section 8. A new leader can't tell which of the older
+        # entries in its log are committed, and can't commit them by counting
+        # copies (see _advance_commit). An entry from its own term fixes both:
+        # once that is committed, so is everything before it. So it starts
+        # with an empty one, a no-op, instead of waiting for a client.
+        self.log.append([Entry(self.term, NO_OP)])
+        self._advance_commit()
         # Tell everyone at once, before another node times out and runs
         self._broadcast_append()
 

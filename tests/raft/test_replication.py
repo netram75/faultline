@@ -1,6 +1,8 @@
 """The leader's side and the follower's side of copying the log, one node at
 a time. Whole clusters are tested in test_safety.py."""
 
+import pytest
+
 from faultline.fs.fake import FakeFileSystem
 from faultline.raft.messages import AppendReply, AppendRequest, Entry, Message, VoteReply
 from faultline.raft.node import Config, Node, Role
@@ -13,13 +15,19 @@ def new_node(node_id: int, fs: FakeFileSystem | None = None) -> Node:
     return Node.open(fs or FakeFileSystem(), f"/node{node_id}", node_id, PEERS, CONFIG)
 
 
-def new_leader(fs: FakeFileSystem | None = None) -> Node:
-    """Node 1, elected leader by handing it the votes."""
+def new_leader(fs: FakeFileSystem | None = None, caught_up: bool = True) -> Node:
+    """Node 1, elected leader by handing it the votes. With `caught_up`, both
+    followers have also acknowledged its whole log (its no-op included), so
+    tests start from a quiet leader that has nothing left to send."""
     node = new_node(1, fs)
     while node.role is Role.FOLLOWER:
         node.tick()
     node.step(Message(2, 1, node.term, VoteReply(granted=True)))
     assert node.role is Role.LEADER
+    if caught_up:
+        for follower in (2, 3):
+            node.step(Message(follower, 1, node.term, AppendReply(True, node.log.last_index)))
+        node.take_committed()
     node.take_messages()
     return node
 
@@ -31,7 +39,8 @@ def leader_with_entries(count: int) -> Node:
     first = new_leader(fs)
     for i in range(count):
         first.propose(f"cmd{i}".encode())
-    return new_leader(fs)  # restarted on the same disk, and elected again
+    # Restarted on the same disk, and elected again
+    return new_leader(fs, caught_up=False)
 
 
 def appends_to(node: Node, peer: int) -> list[AppendRequest]:
@@ -257,11 +266,34 @@ def test_committed_once_a_majority_has_it() -> None:
     leader = new_leader()
     index = leader.propose(b"a")
     assert index is not None
-    assert leader.commit_index == 0  # only the leader has it
+    assert leader.commit_index == index - 1  # only the leader has it
 
     ack(leader, 2, index)
 
     assert leader.commit_index == index
+
+
+def test_proposing_an_empty_command_is_refused() -> None:
+    with pytest.raises(ValueError, match="no-op"):
+        new_leader().propose(b"")
+
+
+def test_new_leader_starts_with_a_no_op() -> None:
+    leader = new_leader(caught_up=False)
+
+    assert leader.log.entry(leader.log.last_index) == Entry(leader.term, b"")
+
+
+def test_no_op_commits_entries_from_older_terms() -> None:
+    # Without it the old entries would wait for the next client command
+    leader = leader_with_entries(2)
+    assert leader.commit_index == 0
+
+    ack(leader, 2, leader.log.last_index)
+
+    assert leader.commit_index == leader.log.last_index
+    commands = [entry.command for _, entry in leader.take_committed()]
+    assert commands == [b"", b"cmd0", b"cmd1", b""]
 
 
 def test_cluster_of_one_commits_at_once() -> None:
@@ -275,13 +307,13 @@ def test_cluster_of_one_commits_at_once() -> None:
 
 
 def test_copies_of_an_old_term_entry_are_not_counted() -> None:
-    # Raft paper, figure 8. Our leader got entry 1 in term 1 and lost the
-    # lead before committing it. It is leader again in a later term.
+    # Raft paper, figure 8. Our leader got entries 1 and 2 in its first term
+    # and lost the lead before committing them. It is leader again now.
     leader = leader_with_entries(1)
-    assert leader.log.term_at(1) < leader.term
+    assert leader.log.term_at(2) < leader.term
 
-    ack(leader, 2, 1)
-    assert leader.commit_index == 0  # a majority has it, but it is old
+    ack(leader, 2, 2)
+    assert leader.commit_index == 0  # a majority has them, but they are old
 
     index = leader.propose(b"new")
     assert index is not None
