@@ -247,3 +247,89 @@ def test_an_empty_follower_catches_up_in_one_round_trip() -> None:
 
     assert rounds <= 2
     assert follower.log.entries_from(1) == leader.log.entries_from(1)
+
+
+def ack(leader: Node, follower: int, match_index: int) -> None:
+    leader.step(Message(follower, 1, leader.term, AppendReply(True, match_index)))
+
+
+def test_committed_once_a_majority_has_it() -> None:
+    leader = new_leader()
+    index = leader.propose(b"a")
+    assert index is not None
+    assert leader.commit_index == 0  # only the leader has it
+
+    ack(leader, 2, index)
+
+    assert leader.commit_index == index
+
+
+def test_cluster_of_one_commits_at_once() -> None:
+    node = Node.open(FakeFileSystem(), "/solo", 1, [1], CONFIG)
+    while node.role is not Role.LEADER:
+        node.tick()
+
+    index = node.propose(b"a")
+
+    assert node.commit_index == index
+
+
+def test_copies_of_an_old_term_entry_are_not_counted() -> None:
+    # Raft paper, figure 8. Our leader got entry 1 in term 1 and lost the
+    # lead before committing it. It is leader again in a later term.
+    leader = leader_with_entries(1)
+    assert leader.log.term_at(1) < leader.term
+
+    ack(leader, 2, 1)
+    assert leader.commit_index == 0  # a majority has it, but it is old
+
+    index = leader.propose(b"new")
+    assert index is not None
+    ack(leader, 2, index)
+    assert leader.commit_index == index  # and entry 1 is committed with it
+
+
+def test_commit_index_goes_out_with_the_next_append() -> None:
+    leader = new_leader()
+    index = leader.propose(b"a")
+    assert index is not None
+    ack(leader, 2, index)
+    leader.take_messages()
+
+    for _ in range(CONFIG.heartbeat_ticks):
+        leader.tick()
+
+    assert all(request.commit_index == index for request in appends_to(leader, 3))
+
+
+def test_follower_commits_what_the_leader_says() -> None:
+    node = new_node(2)
+
+    node.step(Message(1, 2, 1, AppendRequest(0, 0, (Entry(1, b"a"), Entry(1, b"b")), 2)))
+
+    assert node.commit_index == 2
+
+
+def test_follower_commits_only_what_the_message_vouched_for() -> None:
+    # Our entries 2 and 3 are from an old leader. The new leader says entry 2
+    # is committed, but its message only covers entry 1, so we can't tell
+    # our entry 2 is the one it means.
+    node = follower_with_log(1, 1, 1)
+
+    node.step(Message(1, 2, 2, AppendRequest(1, 1, (), commit_index=2)))
+
+    assert node.commit_index == 1
+
+
+def test_follower_commit_index_never_goes_down() -> None:
+    node = new_node(2)
+    node.step(Message(1, 2, 1, AppendRequest(0, 0, (Entry(1, b"a"), Entry(1, b"b")), 2)))
+
+    # Late: sent before the leader knew entry 2 was committed
+    node.step(Message(1, 2, 1, AppendRequest(0, 0, (Entry(1, b"a"),), 1)))
+    assert node.commit_index == 2
+
+    # Covers only entry 1, so it vouches for no more than that, but that is
+    # no reason to forget that entry 2 is committed
+    node.step(Message(1, 2, 1, AppendRequest(0, 0, (Entry(1, b"a"),), 5)))
+    assert node.commit_index == 2

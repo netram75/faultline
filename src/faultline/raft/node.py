@@ -177,6 +177,7 @@ class Node:
             return None
         # On our own disk before anyone else hears of it
         self.log.append([Entry(self.term, command)])
+        self._advance_commit()  # a cluster of one needs nobody else
         for peer in self._others:
             self._send_append(peer)
         return self.log.last_index
@@ -287,8 +288,14 @@ class Node:
             self._send(leader, AppendReply(success=False, match_index=hint))
             return
         self._append_new_entries(request.prev_log_index, request.entries)
-        # log.append() synced the entries, so this promise holds after a crash
         last_new = request.prev_log_index + len(request.entries)
+        # Raft paper, figure 2 (AppendEntries step 5). Only up to what this
+        # message vouched for: entries after it in our log may be left over
+        # from an old leader and not match. And never down: a late message
+        # can carry an older commit index.
+        if request.commit_index > self.commit_index:
+            self.commit_index = max(self.commit_index, min(request.commit_index, last_new))
+        # log.append() synced the entries, so this promise holds after a crash
         self._send(leader, AppendReply(success=True, match_index=last_new))
 
     def _mismatch_hint(self, prev_index: int) -> int:
@@ -332,10 +339,29 @@ class Node:
         progress = self._progress[follower]
         if reply.success:
             progress.on_success(reply.match_index)
+            self._advance_commit()
         else:
             progress.on_failure(reply.match_index)
             # Try again from the new spot straight away, not at the next heartbeat
             self._send_append(follower)
+
+    def _advance_commit(self) -> None:
+        """Raft paper, figure 2 (last rule for leaders) and section 5.4.2.
+
+        An entry is committed once a majority of nodes has it. But the leader
+        only counts copies of entries from its own term. Entries from older
+        terms get committed along with the first current-term entry above
+        them. Counting copies of an old entry is not enough: figure 8 of the
+        paper shows an old entry on a majority that a later leader still
+        overwrites.
+        """
+        for index in range(self.log.last_index, self.commit_index, -1):
+            if self.log.term_at(index) != self.term:
+                return  # terms only go down from here, so no current-term entry is left
+            copies = 1 + sum(1 for p in self._progress.values() if p.match >= index)
+            if 2 * copies > len(self._others) + 1:
+                self.commit_index = index
+                return
 
     def _become_leader(self) -> None:
         self.role = Role.LEADER
