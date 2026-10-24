@@ -5,14 +5,23 @@ run a few nodes from one seed and be mean to them: lose, delay, repeat and
 reorder messages, cut the network into parts, and crash and restart nodes
 with their disks.
 
-While it runs it checks election safety (Raft paper, figure 3): there is
-never more than one leader in a term.
+While it runs it checks three of Raft's safety rules (Raft paper, figure 3):
+
+* Election safety: never more than one leader in a term.
+* State machine safety: if two nodes apply an entry at the same index, it is
+  the same entry. Nodes apply as soon as they can, and every entry applied
+  anywhere is remembered and compared.
+* Leader completeness: a new leader has every entry that was committed
+  before it, at the same index.
+
+check_logs() checks the fourth, log matching, which is too slow to run after
+every message.
 """
 
 import random
 
 from faultline.fs.fake import FakeFileSystem
-from faultline.raft.messages import Message, NodeId
+from faultline.raft.messages import Entry, Message, NodeId
 from faultline.raft.node import Config, Node, Role
 
 
@@ -43,6 +52,7 @@ class Cluster:
         self.groups: list[set[NodeId]] = [set(self.ids)]
         self.in_flight: list[Message] = []
         self.leaders_by_term: dict[int, set[NodeId]] = {}
+        self.committed: dict[int, Entry] = {}  # every entry any node applied
 
     def tick(self, rounds: int = 1) -> None:
         """Let time pass: every running node ticks, then messages move."""
@@ -53,11 +63,27 @@ class Cluster:
                     self._collect(i)
             self._deliver()
 
+    def deliver(self) -> None:
+        """Move the messages in flight once, without time passing."""
+        self._deliver()
+
+    def elect(self, i: NodeId, max_rounds: int = 200) -> None:
+        """Make node `i` win an election. Only it ticks, so only it times
+        out, and messages move until it is leader."""
+        for _ in range(max_rounds):
+            if self.nodes[i].role is Role.LEADER:
+                return
+            self.nodes[i].tick()
+            self._collect(i)
+            self._deliver()
+        raise AssertionError(f"node {i} did not win an election")
+
     def partition(self, *groups: set[NodeId]) -> None:
         """Only nodes in the same group can talk. Nodes left out of every
-        group are alone."""
-        listed = set().union(*groups)
-        self.groups = [*groups, *({i} for i in self.ids if i not in listed)]
+        group form one more group, so partition({3}) cuts node 3 off from
+        the rest."""
+        rest = set(self.ids) - set().union(*groups)
+        self.groups = [*groups, rest]
 
     def heal(self) -> None:
         self.groups = [set(self.ids)]
@@ -69,6 +95,26 @@ class Cluster:
     def restart(self, i: NodeId) -> None:
         self.down.discard(i)
         self.nodes[i] = self._open(i)
+
+    def propose(self, command: bytes) -> int | None:
+        """Give a command to the current leader, if there is one."""
+        leader = self.leader()
+        if leader is None:
+            return None
+        index = self.nodes[leader].propose(command)
+        self._collect(leader)
+        return index
+
+    def check_logs(self) -> None:
+        """Log matching (Raft paper, section 5.3): if two logs have an entry
+        with the same index and term, they are the same up to that index."""
+        logs = [self.nodes[i].log for i in self.ids if i not in self.down]
+        for a in logs:
+            for b in logs:
+                for index in range(min(a.last_index, b.last_index), 0, -1):
+                    if a.term_at(index) == b.term_at(index):
+                        assert a.entries_from(1, index) == b.entries_from(1, index)
+                        break
 
     def leader(self) -> NodeId | None:
         """The running node that is leader in the newest term, if any."""
@@ -103,6 +149,9 @@ class Cluster:
     def _collect(self, i: NodeId) -> None:
         self.in_flight += self.nodes[i].take_messages()
         self._check_election_safety()
+        for index, entry in self.nodes[i].take_committed():
+            first = self.committed.setdefault(index, entry)
+            assert first == entry, f"node {i} applied {entry} at {index}, another applied {first}"
 
     def _deliver(self) -> None:
         messages, self.in_flight = self.in_flight, []
@@ -128,5 +177,12 @@ class Cluster:
             node = self.nodes[i]
             if i not in self.down and node.role is Role.LEADER:
                 leaders = self.leaders_by_term.setdefault(node.term, set())
+                if i in leaders:
+                    continue
                 leaders.add(i)
                 assert len(leaders) == 1, f"two leaders in term {node.term}: {sorted(leaders)}"
+                # A new leader. It must have everything committed so far.
+                for index, entry in self.committed.items():
+                    assert index <= node.log.last_index and node.log.entry(index) == entry, (
+                        f"leader {i} of term {node.term} is missing committed entry {index}"
+                    )
