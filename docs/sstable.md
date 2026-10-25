@@ -66,7 +66,7 @@ all at once.
 
 SSTables are written once, synced (file and folder), and never changed
 again. No locks, no partial updates. Old ones get replaced by compaction
-later (Day 3).
+later (see [lsm.md](lsm.md)).
 
 ## Bloom filter
 

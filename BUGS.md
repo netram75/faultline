@@ -39,7 +39,7 @@ nodes off from the rest. But every node left off the list ended up alone,
 so `partition({3})` cut every node off from every other. Two election tests
 called it that way to cut off one node, and both still passed, which is the
 worrying part: they checked the cut-off node and never looked at whether
-the rest could still talk. **Fixed** in the Day 5 tests: the nodes left off
+the rest could still talk. **Fixed** in the replication tests: the nodes left off
 the list now form one group together.
 
 ### Checker: milliseconds were not enough to order operations
@@ -71,7 +71,7 @@ are now checked, and all are ok, in under 0.2 seconds each.
 
 ## The bug hunt
 
-Day 8 ran the linearizability checker over the real code:
+The bug hunt ran the linearizability checker over the real code:
 
 | Runs | Settings | Not linearizable |
 |---|---|---|

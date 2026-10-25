@@ -167,7 +167,7 @@ Two lessons from this table:
   so a run that goes wrong early still runs to the end before it is caught.
 - **Clients know every node.** They don't need to discover the cluster.
 - **One process.** Real concurrency (threads, real sockets) is not exercised
-  here. That is what the real cluster and its chaos tests are for (Day 9).
+  here. That is what the real cluster and its chaos tests are for.
 
 ## Every night
 

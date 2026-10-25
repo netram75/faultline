@@ -63,7 +63,7 @@ is in [getting-started.md](docs/getting-started.md).
 | Every answer clients got | the linearizability checker, at the end of every simulated and chaos run |
 | The tests themselves | bugs put in on purpose, one at a time, to see that a test fails |
 
-The bug hunt on Day 8: 902 simulator runs, many of them harsh, and the
+The bug hunt: 902 simulator runs, many of them harsh, and the
 checker found no answer that one copy of the data couldn't have given. The
 tests did catch three bugs switched on for the purpose (a write applied
 twice, a write answered before it was committed, a read served by a leader

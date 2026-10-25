@@ -14,7 +14,7 @@ knows the value its last finished write left there, so
 * at the end, every node has exactly that value.
 
 The full check, for clients that share keys, is the linearizability checker
-on Day 8.
+in src/faultline/checker.
 """
 
 import random
