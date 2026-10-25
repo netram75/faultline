@@ -28,6 +28,14 @@ def test_unknown_node(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> Non
     assert "node 2 is not in" in capsys.readouterr().err
 
 
+def test_bad_metrics_address(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path, _ = one_node_cluster(tmp_path)
+
+    with pytest.raises(SystemExit):
+        main(["serve", "--id", "1", "--cluster", str(path), "--metrics", "nope"])
+    assert "host:port" in capsys.readouterr().err
+
+
 def test_missing_cluster_file(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         main(["serve", "--id", "1", "--cluster", str(tmp_path / "nope.toml")])
@@ -37,7 +45,9 @@ def test_missing_cluster_file(tmp_path: Path, capsys: pytest.CaptureFixture[str]
 def test_serve_for_real(tmp_path: Path) -> None:
     # The real command, in its own process: start it, use it, stop it
     path, client_address = one_node_cluster(tmp_path)
+    [metrics_port] = free_ports(1)
     command = [sys.executable, "-m", "faultline", "serve", "--id", "1", "--cluster", str(path)]
+    command += ["--metrics", f"127.0.0.1:{metrics_port}"]
     process = subprocess.Popen(
         [*command, "--data", str(tmp_path / "data")],
         stdout=subprocess.DEVNULL,
@@ -57,6 +67,11 @@ def test_serve_for_real(tmp_path: Path) -> None:
                 await asyncio.sleep(0.05)  # no leader yet
             assert await client.call("GET", "k") == b"v"
             await client.close()
+
+            reader, writer = await asyncio.open_connection("127.0.0.1", metrics_port)
+            writer.write(b"GET /metrics HTTP/1.1\r\n\r\n")
+            assert b"faultline_is_leader 1" in await reader.read()
+            writer.close()
 
         run(body, timeout=20)
     finally:

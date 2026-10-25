@@ -3,28 +3,7 @@ from pathlib import Path
 
 from faultline.net.client import Client
 from faultline.net.resp import RespError, SimpleString
-from tests.net.helpers import LocalCluster, run, wait_for
-
-
-async def leader_client(cluster: LocalCluster) -> Client:
-    """A client on the leader, once the leader can serve reads."""
-    leader = await cluster.wait_for_leader()
-    client = await Client.connect(cluster.clients[leader])
-    await wait_for_reads(client)
-    return client
-
-
-async def wait_for_reads(client: Client) -> None:
-    ready = False
-
-    async def check() -> None:
-        nonlocal ready
-        ready = not isinstance(await client.call("GET", "warm-up"), RespError)
-
-    while not ready:
-        await check()
-        if not ready:
-            await asyncio.sleep(0.01)
+from tests.net.helpers import LocalCluster, leader_client, run, wait_for
 
 
 def test_commands(tmp_path: Path) -> None:

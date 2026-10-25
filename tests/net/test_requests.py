@@ -1,7 +1,7 @@
 import pytest
 
 from faultline.kv.commands import CompareAndSet, Delete, Put
-from faultline.net.requests import BadRequest, Get, Ping, Request, parse_request
+from faultline.net.requests import BadRequest, Get, Info, Ping, Request, parse_request
 from faultline.net.resp import Parser, SimpleString, Value
 
 
@@ -15,6 +15,8 @@ from faultline.net.resp import Parser, SimpleString, Value
         ([b"DEL", b"k"], Delete(b"k")),
         ([b"SETNX", b"k", b"v"], CompareAndSet(b"k", None, b"v")),
         ([b"CAS", b"k", b"old", b"new"], CompareAndSet(b"k", b"old", b"new")),
+        ([b"INFO"], Info()),
+        ([b"INFO", b"all"], Info()),
     ],
 )
 def test_commands(command: Value, request_: Request) -> None:

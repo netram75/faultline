@@ -9,6 +9,7 @@ A Redis client sends each command as an array of bulk strings, like
     DEL key                     1 if the key was there, 0 if not
     SETNX key value             1 if it was set, 0 if the key was already there
     CAS key expected value      1 if key held expected and is now value, 0 if not
+    INFO [section]              numbers about this node (see metrics.py)
 
 SET, DEL and SETNX are real Redis commands, so redis-cli and the usual Redis
 libraries can send them as they are. CAS is ours: Redis has no plain
@@ -41,7 +42,12 @@ class Get:
     key: bytes
 
 
-type Request = Ping | Get | Operation
+@dataclass(frozen=True)
+class Info:
+    pass
+
+
+type Request = Ping | Get | Info | Operation
 
 # How many arguments each command takes, after its name
 _ARGUMENTS = {
@@ -51,6 +57,7 @@ _ARGUMENTS = {
     "DEL": (1, 1),
     "SETNX": (2, 2),
     "CAS": (3, 3),
+    "INFO": (0, 1),  # Redis takes a section name. We have one section and ignore it.
 }
 
 
@@ -73,6 +80,8 @@ def parse_request(value: Value) -> Request:
             return Ping(args[0] if args else None)
         case "GET":
             return Get(args[0])
+        case "INFO":
+            return Info()
         case "SET":
             return Put(args[0], args[1])
         case "DEL":

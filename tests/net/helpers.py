@@ -1,14 +1,16 @@
 """Helpers for tests that run real nodes on this machine."""
 
-__all__ = ["LocalCluster", "free_ports", "read", "run", "wait_for"]
+__all__ = ["LocalCluster", "free_ports", "leader_client", "read", "run", "wait_for"]
 
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+from faultline.net.client import Client
 from faultline.net.local import free_ports
 from faultline.net.node import Address, NodeRunner
+from faultline.net.resp import RespError
 from faultline.net.server import ClientServer
 from faultline.raft.messages import NodeId
 from faultline.raft.node import Role
@@ -112,3 +114,24 @@ async def read(runner: NodeRunner, key: bytes, timeout: float = 10) -> bytes | N
     await wait_for(started, timeout, "the node to take reads")
     assert future is not None
     return await asyncio.wait_for(future, timeout)
+
+
+async def leader_client(cluster: LocalCluster) -> Client:
+    """A client on the leader, once the leader can serve reads."""
+    leader = await cluster.wait_for_leader()
+    client = await Client.connect(cluster.clients[leader])
+    await wait_for_reads(client)
+    return client
+
+
+async def wait_for_reads(client: Client) -> None:
+    ready = False
+
+    async def check() -> None:
+        nonlocal ready
+        ready = not isinstance(await client.call("GET", "warm-up"), RespError)
+
+    while not ready:
+        await check()
+        if not ready:
+            await asyncio.sleep(0.01)

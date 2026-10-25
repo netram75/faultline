@@ -17,6 +17,7 @@ twice. Real Redis is the same.
 Answers:
 
     PING            +PONG, or the message back
+    INFO            numbers about this node, as text (see metrics.py)
     GET             the value, or null if the key is missing
     SET             +OK
     DEL             :1 (faultline does not track whether the key was there)
@@ -36,12 +37,14 @@ happen later. That is the "info" outcome the checker deals with.
 import asyncio
 import logging
 import random
+import time
 from dataclasses import dataclass
 
 from faultline.kv.commands import Command, CompareAndSet, Delete, Operation, Put
 from faultline.kv.state_machine import Result
+from faultline.net.metrics import Metrics, info_text
 from faultline.net.node import Address, NodeRunner
-from faultline.net.requests import BadRequest, Get, Ping, parse_request
+from faultline.net.requests import BadRequest, Get, Info, Ping, Request, parse_request
 from faultline.net.resp import Parser, ProtocolError, RespError, SimpleString, Value, encode
 from faultline.raft.messages import NodeId
 
@@ -63,6 +66,7 @@ class ClientServer:
         self.runner = runner
         self.clients = clients
         self.timeout = timeout
+        self.metrics = Metrics()
         self._server: asyncio.Server | None = None
         self._connections: set[asyncio.StreamWriter] = set()
         self._stopping = False
@@ -87,6 +91,7 @@ class ClientServer:
             writer.close()
             return
         self._connections.add(writer)
+        self.metrics.connections += 1
         session = _Session(random.SystemRandom().getrandbits(64))
         parser = Parser()
         try:
@@ -102,19 +107,30 @@ class ClientServer:
             pass
         finally:
             self._connections.discard(writer)
+            self.metrics.connections -= 1
             writer.close()
 
     async def _answer(self, value: Value, session: _Session) -> Value:
         try:
             request = parse_request(value)
         except BadRequest as e:
+            self.metrics.record("bad", 0, "ERR")
             return RespError(str(e))
+        started = time.monotonic()
+        reply = await self._run(request, session)
+        error = reply.message.split()[0] if isinstance(reply, RespError) else None
+        self.metrics.record(_name(request), time.monotonic() - started, error)
+        return reply
+
+    async def _run(self, request: Request, session: _Session) -> Value:
         if not self.runner.running:
             return RespError("TRYAGAIN the node is stopping")
 
         match request:
             case Ping(message):
                 return SimpleString("PONG") if message is None else message
+            case Info():
+                return info_text(self.metrics, self.runner).encode()
             case Get(key):
                 read = self.runner.read(key)
                 if read is None:
@@ -155,6 +171,19 @@ class ClientServer:
             # an entry of its own term, which takes one round trip
             return RespError("TRYAGAIN the leader is just starting")
         return RespError(f"NOTLEADER leader is node {leader} at {self.clients[leader]}")
+
+
+def _name(request: Request) -> str:
+    match request:
+        case CompareAndSet(expected=None):
+            return "setnx"
+        case CompareAndSet():
+            return "cas"
+        case Put():
+            return "set"
+        case Delete():
+            return "del"
+    return type(request).__name__.lower()  # ping, get, info
 
 
 def _write_reply(op: Operation, result: Result) -> Value:
