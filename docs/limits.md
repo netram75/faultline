@@ -1,8 +1,8 @@
 # Design choices and known limits
 
-faultline was built in ten days to learn how a replicated database stays
-correct, and to test that hard. Some things were left out on purpose, and
-some are simply not done yet. This page lists them, so nobody has to find
+faultline was built to learn how a replicated database stays correct, and
+to test that hard. Some things were left out on purpose, and some are
+simply not done yet. This page lists them, so nobody has to find
 out the hard way.
 
 ## Things it does not do

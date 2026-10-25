@@ -167,3 +167,36 @@ do.
 
 29 bugs put into the checker one at a time, all caught, plus one that
 turned out not to be a bug. The table is in the checker doc.
+
+### The real server ([docs/net.md](docs/net.md))
+
+| Bug put in | Caught by |
+|---|---|
+| Every connection shares one client id | each connection is its own session |
+| The write number (seq) never moves | the commands test (the second write gets the first one's answer) |
+| NOTLEADER names this node instead of the leader | a follower points to the leader |
+| A write that timed out is answered OK | a write with no majority times out |
+| Any node answers reads from its own data | a follower points to the leader |
+| A frame says it is one byte longer than it is | 32 tests, everything over TCP |
+| A frame keeps its length bytes in the message | frame tests |
+| A leader answers reads from its own data, without ReadIndex | **no** |
+
+**The miss.** The test that freezes the leader with SIGSTOP should catch the
+last one, and doesn't: when the frozen leader wakes up, the new leader's
+messages are already waiting in its socket. It reads those first, sees the
+newer term, and steps down before it gets to the read. Real processes can't
+force the dangerous moment. The simulator can, which is why its
+`leader-read` bug exists (above).
+
+### The chaos client ([src/faultline/chaos/clients.py](src/faultline/chaos/clients.py))
+
+How a chaos client writes down an outcome decides what the checker may
+conclude, so it got its own bugs:
+
+| Bug put in | Caught? |
+|---|---|
+| A write that timed out written down as failed | yes |
+| A write sent again after its connection broke | yes |
+| NOTLEADER ends the operation instead of asking the leader | yes |
+| A compare-and-set that did not match written down as matched | yes |
+| A write that timed out sent again | yes |
