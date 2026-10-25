@@ -1,28 +1,17 @@
 """Helpers for tests that run real nodes on this machine."""
 
+__all__ = ["LocalCluster", "free_ports", "read", "run", "wait_for"]
+
 import asyncio
-import socket
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+from faultline.net.local import free_ports
 from faultline.net.node import Address, NodeRunner
 from faultline.net.server import ClientServer
 from faultline.raft.messages import NodeId
 from faultline.raft.node import Role
-
-
-def free_ports(count: int) -> list[int]:
-    """Ports nobody is using right now. Hold them all open at once, so we
-    don't get the same one twice."""
-    sockets = [socket.socket() for _ in range(count)]
-    try:
-        for s in sockets:
-            s.bind(("127.0.0.1", 0))
-        return [s.getsockname()[1] for s in sockets]
-    finally:
-        for s in sockets:
-            s.close()
 
 
 def run[T](test: Callable[[], Awaitable[T]], timeout: float = 30) -> T:
