@@ -1,0 +1,66 @@
+name: Nightly
+
+# Longer runs than every push can afford: many simulator seeds, and a chaos
+# run on real processes. New seeds every night (taken from the date), so over
+# time they cover far more runs than any one day. A failure prints the exact
+# command that replays it.
+
+on:
+  schedule:
+    - cron: "17 21 * * *"  # 02:47 in India
+  workflow_dispatch:
+
+jobs:
+  simulator:
+    name: 500 simulator runs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: uv sync --locked
+
+      - name: Heavy faults, 30 simulated seconds each
+        run: |
+          seed="$(date -u +%Y%m%d)000"
+          echo "first seed: $seed"
+          uv run python -m faultline.sim --seed "$seed" --runs 500 --seconds 30 \
+            | tee simulator.log
+
+      - name: Keep the log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simulator-log
+          path: simulator.log
+
+  chaos:
+    name: 2 minutes of chaos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: uv sync --locked
+
+      - name: kill -9 and SIGSTOP on three real nodes
+        run: |
+          uv run python -m faultline.chaos --seconds 120 --seed "$(date -u +%Y%m%d)" \
+            --history chaos-history.jsonl --data chaos-data
+
+      - name: Keep the history and the node logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos
+          path: |
+            chaos-history.jsonl
+            chaos-data/*.log

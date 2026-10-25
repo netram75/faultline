@@ -168,3 +168,13 @@ Two lessons from this table:
 - **Clients know every node.** They don't need to discover the cluster.
 - **One process.** Real concurrency (threads, real sockets) is not exercised
   here. That is what the real cluster and its chaos tests are for (Day 9).
+
+## Every night
+
+Every push runs the tests, which include nearly two hundred short simulator
+runs. Every night, CI ([nightly.yml](../.github/workflows/nightly.yml)) goes
+further: 500 runs of 30 simulated seconds with heavy faults, on seeds taken
+from the date, so each night covers runs no earlier night did. Then a two
+minute chaos run on real processes
+([getting-started.md](getting-started.md#chaos)). A failing seed prints the
+exact command that replays it.
