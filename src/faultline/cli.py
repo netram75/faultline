@@ -1,6 +1,7 @@
 """The faultline command.
 
     faultline serve --id 1 --cluster cluster.toml [--data DIR] [--metrics HOST:PORT]
+    faultline --version
 
 starts one node of the cluster described in the cluster file (see
 net/cluster.py), and runs until it gets Ctrl-C or SIGTERM. Start one per
@@ -17,6 +18,7 @@ import os
 import signal
 import sys
 
+from faultline import __version__
 from faultline.net.cluster import BadCluster, Cluster, load_cluster
 from faultline.net.metrics import MetricsServer, prometheus_text
 from faultline.net.node import Address, NodeRunner
@@ -26,6 +28,7 @@ from faultline.raft.messages import NodeId
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="faultline", description=__doc__.split("\n\n")[0])
+    parser.add_argument("--version", action="version", version=f"faultline {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     serve = commands.add_parser("serve", help="run one node of a cluster")
     serve.add_argument("--id", type=int, required=True, help="this node's id in the cluster file")

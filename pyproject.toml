@@ -1,6 +1,6 @@
 [project]
 name = "faultline"
-version = "0.0.1"
+version = "0.1.0"
 description = "A replicated key-value store built to survive crashes, tested by breaking it on purpose."
 readme = "README.md"
 license = "MIT"
@@ -8,6 +8,23 @@ license-files = ["LICENSE"]
 authors = [{ name = "Netram Faran" }]
 requires-python = ">=3.12"
 dependencies = []
+keywords = ["raft", "key-value", "lsm-tree", "linearizability", "fault-injection", "redis"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database :: Database Engines/Servers",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/netram75/faultline"
+Documentation = "https://github.com/netram75/faultline/tree/main/docs"
+Changelog = "https://github.com/netram75/faultline/blob/main/CHANGELOG.md"
 
 [project.scripts]
 faultline = "faultline.cli:main"
