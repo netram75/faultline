@@ -21,6 +21,7 @@ history digest: 390c30f7b6fd59ca
 python -m faultline.sim --seed 1 --runs 1000           # bug hunt: one line per seed
 python -m faultline.sim --seed 7 --log                 # what the nemesis did, and when
 python -m faultline.sim --seed 7 --history out.jsonl   # every client operation, for the checker
+python -m faultline.sim --seed 0 --bug early-ack       # a known bug, to see the checker catch it
 ```
 
 The idea comes from FoundationDB, which tests its database this way, and from
@@ -162,7 +163,7 @@ Two lessons from this table:
   not simulated, and neither is a disk that lies about syncing.
 - **Linearizability is checked once, at the end.** The safety checks look
   inside Raft after every step. The linearizability checker
-  (`src/faultline/checker/`) reads the whole history when the run is over,
+  ([checker.md](checker.md)) reads the whole history when the run is over,
   so a run that goes wrong early still runs to the end before it is caught.
 - **Clients know every node.** They don't need to discover the cluster.
 - **One process.** Real concurrency (threads, real sockets) is not exercised

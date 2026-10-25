@@ -1,3 +1,4 @@
+from faultline import checker
 from faultline.checker.check import check
 from faultline.checker.ops import Op
 from faultline.sim.run import simulate
@@ -79,3 +80,16 @@ def test_a_real_run_is_linearizable() -> None:
         # Every op with an answer is in the order
         answered = {op.id for op in result.ops if op.end is not None}
         assert answered <= set(result.order)
+
+
+def test_the_example_in_the_docs() -> None:
+    # docs/checker.md shows this, on a run with a known bug switched on
+    _, world, _ = simulate(seed=0, seconds=5, bug="early-ack")
+
+    report = checker.check(world.history)
+
+    assert report.verdict == "bad"
+    for result in report.bad_keys:
+        explanation = checker.explain(result)
+        assert explanation is not None
+        assert explanation.lines()[0].endswith("no order of its operations gives these answers.")
