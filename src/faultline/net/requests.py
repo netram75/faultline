@@ -6,7 +6,7 @@ A Redis client sends each command as an array of bulk strings, like
     PING [message]              PONG, or the message back
     GET key                     the value, or null if the key is missing
     SET key value               OK
-    DEL key                     1 if the key was there, 0 if not
+    DEL key                     1, always (faultline does not track whether it was there)
     SETNX key value             1 if it was set, 0 if the key was already there
     CAS key expected value      1 if key held expected and is now value, 0 if not
     INFO [section]              numbers about this node (see metrics.py)

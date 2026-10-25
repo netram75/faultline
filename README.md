@@ -18,7 +18,7 @@ writes on purpose, then checks that every answer the database gave was correct.
 - [x] Database on top of Raft: sessions, safe reads, snapshots ([how it works](docs/kv.md))
 - [x] Fault simulator: fake network, fake disk, fake clock, one seed per run ([how it works](docs/simulator.md))
 - [x] Correctness checker (linearizability) and a bug hunt ([how it works](docs/checker.md), [what it found](BUGS.md))
-- [ ] Real cluster: TCP, Redis protocol, Docker, chaos tests, metrics
+- [x] Real cluster: TCP, Redis protocol, Docker, chaos tests, metrics ([how it works](docs/net.md))
 - [ ] Docs and release
 
 ## Layout
@@ -38,6 +38,11 @@ src/faultline/
              safety checks, known bugs to switch on (python -m faultline.sim)
   checker/   the linearizability checker: did the answers clients got come
              from one copy of the data?
+  net/       the real server: Redis protocol, TCP between nodes, metrics,
+             the cluster file, real processes on one machine
+  chaos/     break a real cluster with kill -9 and SIGSTOP, then check it
+             (python -m faultline.chaos)
+  cli.py     the faultline command (faultline serve)
   entry.py   the tombstone that marks a deleted key
 tests/    one folder per package, same names
 docs/     how each part works and why
