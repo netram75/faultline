@@ -1,0 +1,40 @@
+# Three faultline nodes. Start with: docker compose up --build
+#
+# Clients on this machine reach them on ports 6401, 6402 and 6403:
+#
+#   redis-cli -p 6401 SET greeting hello
+#
+# Only the leader takes commands. The others answer NOTLEADER with the
+# leader's name inside the compose network (node2:6379, say), which is port
+# 6402 out here.
+
+services:
+  node1:
+    build: .
+    image: faultline:local
+    command: serve --id 1 --cluster /etc/faultline/cluster.toml --data /data
+    ports: ["6401:6379"]
+    volumes:
+      - ./docker/cluster.toml:/etc/faultline/cluster.toml:ro
+      - node1:/data
+  node2:
+    image: faultline:local
+    depends_on: [node1]  # only so node1 builds the image first
+    command: serve --id 2 --cluster /etc/faultline/cluster.toml --data /data
+    ports: ["6402:6379"]
+    volumes:
+      - ./docker/cluster.toml:/etc/faultline/cluster.toml:ro
+      - node2:/data
+  node3:
+    image: faultline:local
+    depends_on: [node1]
+    command: serve --id 3 --cluster /etc/faultline/cluster.toml --data /data
+    ports: ["6403:6379"]
+    volumes:
+      - ./docker/cluster.toml:/etc/faultline/cluster.toml:ro
+      - node3:/data
+
+volumes:
+  node1:
+  node2:
+  node3:

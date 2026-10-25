@@ -35,3 +35,23 @@ jobs:
 
       - name: Test
         run: uv run pytest
+
+  docker:
+    name: docker / three-node cluster
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image and start three nodes
+        run: docker compose up --build --detach
+
+      - name: SET and GET through the Redis port
+        run: python3 docker/smoke.py 6401 6402 6403
+
+      - name: Node logs
+        if: always()
+        run: docker compose logs
+
+      - name: Stop
+        if: always()
+        run: docker compose down --volumes

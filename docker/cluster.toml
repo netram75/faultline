@@ -1,0 +1,12 @@
+# The cluster inside docker-compose: each node is reached by its service name
+[nodes.1]
+peer = "node1:7000"
+client = "node1:6379"
+
+[nodes.2]
+peer = "node2:7000"
+client = "node2:6379"
+
+[nodes.3]
+peer = "node3:7000"
+client = "node3:6379"
