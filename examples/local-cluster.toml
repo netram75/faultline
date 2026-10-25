@@ -1,0 +1,18 @@
+# Three nodes on this machine. For each node: the address the other nodes
+# use to reach it (peer), and the address Redis clients connect to (client).
+#
+#   faultline serve --id 1 --cluster examples/local-cluster.toml
+#   faultline serve --id 2 --cluster examples/local-cluster.toml
+#   faultline serve --id 3 --cluster examples/local-cluster.toml
+
+[nodes.1]
+peer = "127.0.0.1:7001"
+client = "127.0.0.1:6401"
+
+[nodes.2]
+peer = "127.0.0.1:7002"
+client = "127.0.0.1:6402"
+
+[nodes.3]
+peer = "127.0.0.1:7003"
+client = "127.0.0.1:6403"

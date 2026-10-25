@@ -9,6 +9,9 @@ authors = [{ name = "Netram Faran" }]
 requires-python = ">=3.12"
 dependencies = []
 
+[project.scripts]
+faultline = "faultline.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
