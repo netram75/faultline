@@ -1,0 +1,65 @@
+name: Release
+
+# Push a tag like v0.1.0 and this makes the GitHub release:
+#
+#   git tag -a v0.1.0 -m "faultline 0.1.0"
+#   git push origin v0.1.0
+#
+# It runs every check first, makes sure the tag matches the version in the
+# code, builds the package (a wheel and a source archive), and takes the
+# release notes from that version's section of CHANGELOG.md.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write  # to create the release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: uv sync --locked
+
+      - name: Every check, same as CI
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run mypy
+          uv run pytest
+
+      - name: The tag matches the version
+        run: |
+          version="$(uv run python -c 'import faultline; print(faultline.__version__)')"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "the tag is $GITHUB_REF_NAME but the code says $version"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: uv build
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="$VERSION" '/^## \[/ { found = index($0, "[" v "]") > 0; next } found' \
+            CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "CHANGELOG.md has no section for $VERSION"
+            exit 1
+          fi
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "faultline $VERSION" --notes-file notes.md
