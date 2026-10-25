@@ -65,7 +65,7 @@ def test_a_new_leader_when_the_old_one_stops(tmp_path: Path) -> None:
         await cluster.start()
         try:
             old = await cluster.wait_for_leader()
-            await cluster.runners[old].stop()
+            await cluster.stop_node(old)
 
             new = await cluster.wait_for_leader()
             assert new != old
@@ -74,8 +74,7 @@ def test_a_new_leader_when_the_old_one_stops(tmp_path: Path) -> None:
             assert await asyncio.wait_for(future, 5) == Result(ok=True)
 
             # The old one comes back on the same disk and catches up
-            cluster.runners[old] = cluster.new_runner(old, tmp_path)
-            await cluster.runners[old].start()
+            await cluster.start_node(old)
             await wait_for(
                 lambda: cluster.runners[old].kv.machine.get(b"k") == b"v",
                 what="the old leader to catch up",
@@ -117,9 +116,9 @@ def test_a_write_to_a_lost_leader_never_answers(tmp_path: Path) -> None:
         try:
             leader = await cluster.wait_for_leader()
             # Cut the leader off: stop the other two
-            for i, runner in cluster.runners.items():
+            for i in cluster.runners:
                 if i != leader:
-                    await runner.stop()
+                    await cluster.stop_node(i)
             future = cluster.runners[leader].submit(Command(1, 1, Put(b"k", b"v")))
             assert future is not None
             # No majority, so no commit and no answer. The caller's timeout

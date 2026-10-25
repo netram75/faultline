@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from faultline.net.node import Address, NodeRunner
+from faultline.net.server import ClientServer
 from faultline.raft.messages import NodeId
 from faultline.raft.node import Role
 
@@ -42,29 +43,57 @@ async def wait_for(condition: Callable[[], bool], timeout: float = 10, what: str
 
 
 class LocalCluster:
-    """A few NodeRunners on 127.0.0.1, all in this event loop."""
+    """A few nodes on 127.0.0.1, all in this event loop: for each one a
+    NodeRunner and a ClientServer in front of it."""
 
     def __init__(
-        self, tmp_path: Path, size: int = 3, addresses: dict[NodeId, Address] | None = None
+        self,
+        tmp_path: Path,
+        size: int = 3,
+        addresses: dict[NodeId, Address] | None = None,
+        timeout: float = 2.0,
     ) -> None:
         ids = list(range(1, size + 1))
+        ports = free_ports(2 * size)
         if addresses is None:
-            ports = free_ports(size)
-            addresses = {i: Address("127.0.0.1", port) for i, port in zip(ids, ports, strict=True)}
+            addresses = {i: Address("127.0.0.1", ports[i - 1]) for i in ids}
         self.addresses = addresses
-        self.runners = {i: self.new_runner(i, tmp_path) for i in ids}
+        self.clients = {i: Address("127.0.0.1", ports[size + i - 1]) for i in ids}
+        self.tmp_path = tmp_path
+        self.timeout = timeout
+        self.runners: dict[NodeId, NodeRunner] = {}
+        self.servers: dict[NodeId, ClientServer] = {}
+        self._started: set[NodeId] = set()
+        for i in ids:
+            self._make(i)
 
-    def new_runner(self, i: NodeId, tmp_path: Path) -> NodeRunner:
-        return NodeRunner(i, self.addresses, str(tmp_path / f"node{i}"))
+    def _make(self, i: NodeId) -> None:
+        runner = NodeRunner(i, self.addresses, str(self.tmp_path / f"node{i}"))
+        self.runners[i] = runner
+        self.servers[i] = ClientServer(runner, self.clients, self.timeout)
 
     async def start(self) -> None:
-        for runner in self.runners.values():
-            await runner.start()
+        for i in self.runners:
+            await self.start_node(i)
+
+    async def start_node(self, i: NodeId) -> None:
+        """Start node i. If it ran before, it starts again from its disk."""
+        if self.runners[i].running:
+            return
+        if i in self._started:
+            self._make(i)  # a fresh runner on the same disk, like a restarted process
+        self._started.add(i)
+        await self.runners[i].start()
+        await self.servers[i].start()
+
+    async def stop_node(self, i: NodeId) -> None:
+        if self.runners[i].running:
+            await self.servers[i].stop()
+            await self.runners[i].stop()
 
     async def stop(self) -> None:
-        for runner in self.runners.values():
-            if runner.running:
-                await runner.stop()
+        for i in self.runners:
+            await self.stop_node(i)
 
     def leader(self) -> NodeId | None:
         leaders = [
